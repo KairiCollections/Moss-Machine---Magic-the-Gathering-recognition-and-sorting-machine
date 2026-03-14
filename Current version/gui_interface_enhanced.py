@@ -859,7 +859,7 @@ class ScannerGUI:
         self.ca_bundle_var = tk.StringVar(value="")
         tk.Entry(tls_frame, textvariable=self.ca_bundle_var, width=48, bg='#404040', fg='#fff', insertbackground='#fff').pack(side=tk.LEFT, padx=8)
         self.allow_self_signed_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(tls_frame, text="Allow self-signed certs", variable=self.allow_self_signed_var, bg='#1e1e1e', fg='#fff', selectcolor='#2b2b2b').pack(side=tk.LEFT, padx=8)
+        tk.Checkbutton(tls_frame, text="Bypass SSL (not recommended)", variable=self.allow_self_signed_var, bg='#1e1e1e', fg='#fff', selectcolor='#2b2b2b').pack(side=tk.LEFT, padx=8)
 
         # Downloads area (common files + per-game buttons)
         downloads_area = tk.Frame(frame, bg='#1e1e1e')
