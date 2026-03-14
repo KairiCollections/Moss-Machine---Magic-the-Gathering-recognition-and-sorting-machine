@@ -315,7 +315,7 @@ This system is intended for hobbyist and educational use. Always test with non-v
 ---
 
 ## Support
-Help keep my motivation and my wife less annoyed with the machine's existence
+Help keep my motivation
 - Patreon - https://www.patreon.com/KairiCollections
 - By me a coffee - https://www.buymeacoffee.com/KairiCollections
 - Ko-fi - http://ko-fi.com/kairiskyewillow
