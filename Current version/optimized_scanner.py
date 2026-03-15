@@ -28,9 +28,14 @@ try:
 except Exception:
     serial = None
 import os
+import json
 
 # Import collection manager
 from card_collection_manager import CardCollectionManager
+from mtg_symbol_recognizer import (
+    load_set_symbols,
+    match_symbol_template,
+)
 
 def download_database(db_path="unified_card_database.db"):
     """Download database from server if it doesn't exist locally.
@@ -220,6 +225,12 @@ class OptimizedCardScanner:
         # MSER-based quality scoring (input-only signal, blended into confidence)
         self.enable_mser_scoring = enable_mser_scoring
         self.mser_weight = float(mser_weight)
+
+        # MTG set symbol verification
+        self.enable_set_symbol_check = True
+        self.symbol_min_confidence = 0.50
+        self._mtg_symbols = None
+        self._mtg_roi_config = None
 
     def get_connection(self):
         """Get thread-local database connection"""
@@ -1426,7 +1437,6 @@ class OptimizedCardScanner:
                     outdir.mkdir(parents=True, exist_ok=True)
                     shortname = f"{int(time.time())}_{(r_hash or '')[:8]}_{(g_hash or '')[:8]}_{(b_hash or '')[:8]}.png"
                     pil_image.save(outdir / shortname)
-                    print(f"[+] Saved debug crop: {outdir / shortname}")
                 except Exception as _e:
                     print(f"[!] Failed to save debug crop: {_e}")
             except Exception:
@@ -1438,7 +1448,33 @@ class OptimizedCardScanner:
             matches, _ = self.scan_card(pil_image, threshold=scan_threshold, top_n=3)
 
             if matches and len(matches) > 0:
-                return matches[0]
+                card_info = matches[0]
+
+                # Secondary MTG set symbol verification
+                game_name = (card_info.get('game') or '').lower()
+                if self.enable_set_symbol_check and 'magic' in game_name:
+                    card_name = card_info.get('name')
+                    phash_set = card_info.get('set')
+                    resolved_set, resolved_conf, conf_map = self._select_set_by_symbol(cropped, card_name)
+                    if resolved_set:
+                        if phash_set and phash_set in conf_map:
+                            phash_conf = conf_map.get(phash_set, 0.0)
+                            if resolved_set != phash_set and (resolved_conf - phash_conf) < 0.08:
+                                print(
+                                    f"[!] Symbol match close; keeping pHash set {phash_set} "
+                                    f"(symbol best={resolved_set} {resolved_conf:.3f}, phash={phash_conf:.3f})"
+                                )
+                            else:
+                                card_info['set'] = resolved_set
+                                print(f"[+] Symbol verification matched set: {resolved_set}")
+                        else:
+                            card_info['set'] = resolved_set
+                            print(f"[+] Symbol verification matched set: {resolved_set}")
+                    else:
+                        print("[!] Symbol verification failed; rejecting match")
+                        return None
+
+                return card_info
 
             return None
 
@@ -1487,6 +1523,227 @@ class OptimizedCardScanner:
         except Exception as e:
             print(f"[!] Perspective correction error: {e}")
             return None
+
+    def _load_mtg_roi_config(self):
+        if self._mtg_roi_config is not None:
+            return self._mtg_roi_config
+        config_path = Path(__file__).parent / 'mtg_set_roi_locations.json'
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    self._mtg_roi_config = json.load(f)
+                    return self._mtg_roi_config
+            except Exception:
+                pass
+        self._mtg_roi_config = {
+            "sets": {},
+            "no_symbol_sets": []
+        }
+        return self._mtg_roi_config
+
+    def _verify_mtg_set_symbol(self, image_bgr, set_code, card_name=None):
+        """Return True if symbol matches set_code, False if mismatch at high confidence, or None if skipped."""
+        if image_bgr is None or image_bgr.size == 0 or not set_code:
+            return None
+
+        set_code = str(set_code).upper()
+
+        config = self._load_mtg_roi_config()
+        if set_code in config.get('no_symbol_sets', []):
+            return None
+
+        prior = config.get('sets', {}).get(set_code)
+        if not prior:
+            return None
+
+        if self._mtg_symbols is None:
+            self._mtg_symbols = load_set_symbols()
+
+        # Normalize promo-style set codes (e.g., PPELD -> ELD) if needed
+        if (not prior) or (set_code not in self._mtg_symbols):
+            normalized = self._normalize_mtg_set_code(set_code, config)
+            if normalized and normalized != set_code:
+                print(f"[!] Normalized set code for symbol check: {set_code} -> {normalized}")
+                set_code = normalized
+                prior = config.get('sets', {}).get(set_code)
+
+        if (not prior) or (set_code not in self._mtg_symbols):
+            resolved = self._resolve_symbol_set_from_name(card_name, config)
+            if resolved and resolved != set_code:
+                print(f"[!] Resolved symbol set from name: {set_code} -> {resolved}")
+                set_code = resolved
+                prior = config.get('sets', {}).get(set_code)
+
+        if not self._mtg_symbols or set_code not in self._mtg_symbols:
+            return None
+
+        h, w = image_bgr.shape[:2]
+        px1 = max(0, int(prior[0] * w))
+        py1 = max(0, int(prior[1] * h))
+        px2 = min(w, int(prior[2] * w))
+        py2 = min(h, int(prior[3] * h))
+        if px2 <= px1 or py2 <= py1:
+            return None
+
+        roi = image_bgr[py1:py2, px1:px2]
+        match = match_symbol_template(
+            roi,
+            self._mtg_symbols,
+            true_set_code=set_code,
+            set_only=True,
+            search_all_sets=False,
+            quiet=True,
+            allow_ml_set=False,
+            allow_ml=False
+        )
+
+        if not match:
+            return None
+
+        sym_set = match.get('set_code')
+        sym_conf = float(match.get('confidence', 0.0))
+
+        if sym_conf >= self.symbol_min_confidence and sym_set and sym_set != set_code:
+            print(f"[!] Symbol mismatch: predicted={set_code} symbol={sym_set} conf={sym_conf:.3f}")
+            return False
+
+        return True
+
+    def _select_set_by_symbol(self, image_bgr, card_name):
+        """Match symbol against all printings of a card name; return (set, conf, conf_map)."""
+        if image_bgr is None or image_bgr.size == 0 or not card_name:
+            return None, 0.0, {}
+
+        name = str(card_name).strip()
+        if not name:
+            return None, 0.0, {}
+
+        config = self._load_mtg_roi_config()
+        if self._mtg_symbols is None:
+            self._mtg_symbols = load_set_symbols()
+
+        try:
+            cur = self.get_connection()
+            rows = cur.execute(
+                "SELECT DISTINCT set_code FROM cards_1 WHERE name = ?",
+                (name,)
+            ).fetchall()
+        except Exception:
+            return None, 0.0, {}
+
+        if not rows:
+            return None, 0.0, {}
+
+        candidate_sets = []
+        for (set_code,) in rows:
+            if not set_code:
+                continue
+            sc = str(set_code).upper()
+            if sc in config.get('no_symbol_sets', []):
+                continue
+            if sc in config.get('sets', {}) and sc in (self._mtg_symbols or {}):
+                candidate_sets.append(sc)
+
+        if not candidate_sets:
+            return None, 0.0, {}
+
+        h, w = image_bgr.shape[:2]
+        best_set = None
+        best_conf = 0.0
+        conf_map = {}
+        for sc in candidate_sets:
+            prior = config.get('sets', {}).get(sc)
+            if not prior:
+                continue
+            px1 = max(0, int(prior[0] * w))
+            py1 = max(0, int(prior[1] * h))
+            px2 = min(w, int(prior[2] * w))
+            py2 = min(h, int(prior[3] * h))
+            if px2 <= px1 or py2 <= py1:
+                continue
+
+            roi = image_bgr[py1:py2, px1:px2]
+            match = match_symbol_template(
+                roi,
+                self._mtg_symbols,
+                true_set_code=sc,
+                set_only=True,
+                search_all_sets=False,
+                quiet=True,
+                allow_ml_set=False,
+                allow_ml=False
+            )
+
+            if not match:
+                continue
+            conf = float(match.get('confidence', 0.0))
+            conf_map[sc] = conf
+            if conf > best_conf:
+                best_conf = conf
+                best_set = sc
+
+        if best_set and best_conf >= self.symbol_min_confidence:
+            return best_set, best_conf, conf_map
+
+        return None, 0.0, conf_map
+
+    def _resolve_symbol_set_from_name(self, card_name, config):
+        """Pick a base set code for symbol check based on card name and ROI/template availability."""
+        if not card_name:
+            return None
+
+        name = str(card_name).strip()
+        if not name:
+            return None
+
+        try:
+            cur = self.get_connection()
+            rows = cur.execute(
+                "SELECT set_code, COUNT(*) as cnt FROM cards_1 WHERE name = ? GROUP BY set_code ORDER BY cnt DESC",
+                (name,)
+            ).fetchall()
+        except Exception:
+            return None
+
+        if not rows:
+            return None
+
+        for set_code, _ in rows:
+            if not set_code:
+                continue
+            sc = str(set_code).upper()
+            if sc in config.get('sets', {}) and sc in (self._mtg_symbols or {}):
+                return sc
+
+        return None
+
+    def _normalize_mtg_set_code(self, set_code, config):
+        """Try to map promo-style set codes to base set codes that have ROI/templates."""
+        candidates = []
+        sc = str(set_code).upper()
+
+        # Common promo prefixes
+        if sc.startswith("PP") and len(sc) > 2:
+            candidates.append(sc[2:])
+        if sc.startswith("P") and len(sc) > 1:
+            candidates.append(sc[1:])
+        if sc.startswith("PR") and len(sc) > 2:
+            candidates.append(sc[2:])
+
+        # Remove non-alnum chars
+        alnum = "".join(ch for ch in sc if ch.isalnum())
+        if alnum != sc:
+            candidates.append(alnum)
+
+        # Dedup while preserving order
+        seen = set()
+        candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+        for cand in candidates:
+            if cand in config.get('sets', {}) and cand in (self._mtg_symbols or {}):
+                return cand
+
+        return None
     
     def _handle_unrecognized_card(self, display_frame, card_approx, reason="Unknown"):
         """Display unrecognized card with reason"""
