@@ -3,6 +3,44 @@
 Enhanced GUI Interface for Card Scanner with Arduino Controls
 Features: Live camera, CSV export, Arduino monitoring/control
 """
+# ---------------------------------------------------------------------------
+# Auto-install any missing required packages before importing them
+# ---------------------------------------------------------------------------
+def _ensure_packages():
+    import sys, subprocess
+    _REQUIRED = [
+        "cv2:opencv-python",
+        "numpy:numpy",
+        "PIL:Pillow",
+        "requests:requests",
+        "qrcode:qrcode",
+        "imagehash:imagehash",
+    ]
+    missing = []
+    for spec in _REQUIRED:
+        mod, pkg = spec.split(":")
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        import tkinter as _tk
+        import tkinter.messagebox as _mb
+        _root = _tk.Tk()
+        _root.withdraw()
+        if _mb.askyesno(
+            "Missing Packages",
+            f"The following packages are missing and will be installed now:\n\n"
+            + "\n".join(missing)
+            + "\n\nProceed?",
+        ):
+            _root.destroy()
+            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+        else:
+            _root.destroy()
+            sys.exit(1)
+_ensure_packages()
+# ---------------------------------------------------------------------------
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import os
@@ -228,6 +266,11 @@ class ScannerGUI:
         downloads_tab = tk.Frame(self.notebook, bg='#1e1e1e')
         self.notebook.add(downloads_tab, text='⬇️ Downloads')
         self._setup_downloads_tab(downloads_tab)
+
+        # Tab 7: Tutorial / How To Use
+        tutorial_tab = tk.Frame(self.notebook, bg='#1e1e1e')
+        self.notebook.add(tutorial_tab, text='📖 Tutorial')
+        self._setup_tutorial_tab(tutorial_tab)
         
     def _setup_camera_panel(self, parent):
         """Setup camera feed panel"""
@@ -934,10 +977,38 @@ class ScannerGUI:
         # Populate per-game download buttons only for games allowed by unified DB (games.load = 1)
         try:
             allowed = set(getattr(self, 'allowed_game_ids', set()))
-            if allowed and self.scanner and getattr(self.scanner, 'games', None):
-                for game_key, info in sorted(self.scanner.games.items(), key=lambda x: x[0]):
-                    display = info.get('display_name') or game_key
-                    gid = str(info.get('id') or self.HARD_CODE_GAME_IDS.get(display, game_key))
+            if allowed:
+                # Primary: use scanner.games if available
+                scanner_games = self.scanner and getattr(self.scanner, 'games', None)
+                if scanner_games:
+                    game_rows = []
+                    for game_key, info in sorted(scanner_games.items(), key=lambda x: x[0]):
+                        display = info.get('display_name') or game_key
+                        gid = str(info.get('id') or self.HARD_CODE_GAME_IDS.get(display, game_key))
+                        game_rows.append((display, gid))
+                else:
+                    # Fallback: read names/ids directly from unified DB so buttons show
+                    # even before any game has been selected or the scanner loaded
+                    game_rows = []
+                    unified_path = getattr(self, 'unified_db_path', None) or os.path.join(
+                        os.path.dirname(__file__), 'recognition_data', 'unified_card_database.db')
+                    if os.path.exists(unified_path):
+                        try:
+                            conn = sqlite3.connect(unified_path)
+                            cur = conn.cursor()
+                            cur.execute("PRAGMA table_info(games)")
+                            cols = [r[1] for r in cur.fetchall()]
+                            id_col = next((c for c in ('id', 'game_id', 'game') if c in cols), None)
+                            name_col = next((c for c in ('name', 'display_name', 'game_name') if c in cols), None)
+                            if id_col and name_col:
+                                cur.execute(f"SELECT {id_col}, {name_col} FROM games WHERE load = 1 ORDER BY {name_col}")
+                                for row in cur.fetchall():
+                                    game_rows.append((str(row[1]), str(row[0])))
+                            conn.close()
+                        except Exception:
+                            pass
+
+                for display, gid in game_rows:
                     if gid not in allowed:
                         continue
                     gf = tk.Frame(self.games_frame, bg='#111111', relief=tk.RAISED, bd=1)
@@ -953,7 +1024,10 @@ class ScannerGUI:
     def _prune_hardcoded_map(self):
         """Remove entries from HARD_CODE_GAME_IDS where games.load = 0 in the unified DB."""
         try:
-            conn = sqlite3.connect('unified_card_database.db')
+            _db = os.path.join(os.path.dirname(__file__), 'recognition_data', 'unified_card_database.db')
+            if not os.path.exists(_db):
+                return
+            conn = sqlite3.connect(_db)
             cur = conn.cursor()
             cur.execute("SELECT name FROM games WHERE load = 0")
             rows = cur.fetchall()
@@ -1164,6 +1238,7 @@ class ScannerGUI:
             # try endpoints in order
             tried = []
             success = False
+            dest_path = None
             for ep in endpoints:
                 url = urllib.parse.urljoin(server + '/', ep)
                 tried.append(url)
@@ -1171,7 +1246,7 @@ class ScannerGUI:
                     r = requests.get(url, stream=True, timeout=60, verify=verify_param)
                 except Exception as e:
                     # network/SSL error: report and stop
-                    self.root.after(0, lambda: messagebox.showerror("Download Error", f"Error contacting {url}: {e}"))
+                    self.root.after(0, lambda u=url, err=e: messagebox.showerror("Download Error", f"Error contacting {u}: {err}"))
                     self.root.after(0, lambda: self.download_status_label.config(text=""))
                     success = False
                     break
@@ -1204,14 +1279,14 @@ class ScannerGUI:
                                             pass
                         success = True
                     except Exception as e:
-                        self.root.after(0, lambda: messagebox.showerror("Save Error", str(e)))
+                        self.root.after(0, lambda err=e: messagebox.showerror("Save Error", str(err)))
                         success = False
                     break
                 elif r.status_code == 404:
                     # try next endpoint
                     continue
                 else:
-                    self.root.after(0, lambda: messagebox.showerror("Download Failed", f"Server returned {r.status_code} for {url}"))
+                    self.root.after(0, lambda sc=r.status_code, u=url: messagebox.showerror("Download Failed", f"Server returned {sc} for {u}"))
                     success = False
                     break
 
@@ -1227,48 +1302,50 @@ class ScannerGUI:
                             pass
                     return
 
-            dest_dir = os.path.join(os.path.dirname(__file__), 'recognition_data')
-            # After saving, refresh local recognition DB list and UI
-            try:
-                # If unified DB downloaded, load allowed game ids from it
-                if filename == 'unified_card_database.db':
+            # Only proceed with success handling if download actually succeeded
+            if success and dest_path:
+                dest_dir = os.path.join(os.path.dirname(__file__), 'recognition_data')
+                # After saving, refresh local recognition DB list and UI
+                try:
+                    # If unified DB downloaded, load allowed game ids from it
+                    if filename == 'unified_card_database.db':
+                        try:
+                            self._load_allowed_game_ids_from_unified_db(dest_path)
+                        except Exception:
+                            pass
+                    # Rescan local recognition files and refresh downloads/dropdowns
                     try:
-                        self._load_allowed_game_ids_from_unified_db(dest_path)
+                        self._scan_local_recognition_files()
                     except Exception:
                         pass
-                # Rescan local recognition files and refresh downloads/dropdowns
-                try:
-                    self._scan_local_recognition_files()
+                    try:
+                        self.root.after(0, lambda: self._refresh_download_list())
+                    except Exception:
+                        pass
+                    try:
+                        self.root.after(0, lambda: self._populate_dropdowns())
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-                try:
-                    self.root.after(0, lambda: self._refresh_download_list())
-                except Exception:
-                    pass
-                try:
-                    self.root.after(0, lambda: self._populate_dropdowns())
-                except Exception:
-                    pass
-            except Exception:
-                pass
 
-            self.root.after(0, lambda: self.download_status_label.config(text=f"Saved: {dest_path}"))
-            self.root.after(0, lambda: messagebox.showinfo("Download Complete", f"Saved to {dest_path}"))
-            # finish progress UI
-            try:
-                if progress_bar is not None:
-                    self.root.after(0, lambda: progress_bar.config(value=100))
-                if status_label is not None and os.path.exists(dest_path):
-                    self.root.after(0, lambda: status_label.config(text=f"Saved {os.path.basename(dest_path)}"))
-                if prog_win:
-                    try:
-                        prog_win.destroy()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                self.root.after(0, lambda path=dest_path: self.download_status_label.config(text=f"Saved: {path}"))
+                self.root.after(0, lambda path=dest_path: messagebox.showinfo("Download Complete", f"Saved to {path}"))
+                # finish progress UI
+                try:
+                    if progress_bar is not None:
+                        self.root.after(0, lambda: progress_bar.config(value=100))
+                    if status_label is not None and os.path.exists(dest_path):
+                        self.root.after(0, lambda path=dest_path: status_label.config(text=f"Saved {os.path.basename(path)}"))
+                    if prog_win:
+                        try:
+                            prog_win.destroy()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Download Error", str(e)))
+            self.root.after(0, lambda err=e: messagebox.showerror("Download Error", str(err)))
             self.root.after(0, lambda: self.download_status_label.config(text=""))
             if prog_win:
                 try:
@@ -1276,6 +1353,172 @@ class ScannerGUI:
                 except Exception:
                     pass
     
+    def _setup_tutorial_tab(self, parent):
+        """Setup Tutorial / How-To-Use tab with scrollable content."""
+        outer = tk.Frame(parent, bg='#1e1e1e')
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(outer, bg='#1e1e1e', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        inner = tk.Frame(canvas, bg='#1e1e1e')
+
+        inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.create_window((0, 0), window=inner, anchor='nw')
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_mousewheel))
+        canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
+
+        # --- helpers ---
+        def h1(text):
+            tk.Label(inner, text=text, bg='#1e1e1e', fg='#4CAF50',
+                     font=('Segoe UI', 13, 'bold'), anchor='w').pack(fill=tk.X, padx=20, pady=(16, 3))
+
+        def h2(text):
+            tk.Label(inner, text=text, bg='#1e1e1e', fg='#2196F3',
+                     font=('Segoe UI', 10, 'bold'), anchor='w').pack(fill=tk.X, padx=28, pady=(10, 2))
+
+        def para(text):
+            tk.Label(inner, text=text, bg='#1e1e1e', fg='#cccccc',
+                     font=('Segoe UI', 9), anchor='w', justify='left',
+                     wraplength=600).pack(fill=tk.X, padx=32, pady=2)
+
+        def step(num, text):
+            row = tk.Frame(inner, bg='#1e1e1e')
+            row.pack(fill=tk.X, padx=32, pady=1)
+            tk.Label(row, text=f"{num}.", bg='#1e1e1e', fg='#4CAF50',
+                     font=('Segoe UI', 9, 'bold'), width=3, anchor='nw').pack(side=tk.LEFT)
+            tk.Label(row, text=text, bg='#1e1e1e', fg='#cccccc',
+                     font=('Segoe UI', 9), anchor='w', justify='left',
+                     wraplength=560).pack(side=tk.LEFT, fill=tk.X)
+
+        def tip(text):
+            f = tk.Frame(inner, bg='#1a3020')
+            f.pack(fill=tk.X, padx=20, pady=(4, 2))
+            tk.Label(f, text=f"💡  {text}", bg='#1a3020', fg='#a5d6a7',
+                     font=('Segoe UI', 9), anchor='w', justify='left',
+                     wraplength=580).pack(fill=tk.X, padx=10, pady=6)
+
+        def warn(text):
+            f = tk.Frame(inner, bg='#2e2000')
+            f.pack(fill=tk.X, padx=20, pady=(4, 2))
+            tk.Label(f, text=f"⚠️  {text}", bg='#2e2000', fg='#ffe082',
+                     font=('Segoe UI', 9), anchor='w', justify='left',
+                     wraplength=580).pack(fill=tk.X, padx=10, pady=6)
+
+        def sep():
+            tk.Frame(inner, bg='#333333', height=1).pack(fill=tk.X, padx=20, pady=8)
+
+        # -------------------------------------------------------
+        h1("📖  Welcome to TCG Card Scanner")
+        para("This application identifies physical trading cards using your webcam, matches them "
+             "against a perceptual-hash (pHash) image database, and optionally controls an Arduino-based "
+             "sorting machine to physically route cards into labelled bins.")
+
+        sep()
+
+        # PREPARATIONS
+        h1("🔧  Preparations — What You Need")
+        h2("Required Software & Hardware")
+        step(1, "Python 3.9 or later installed on your system.")
+        step(2, "All Python dependencies installed — open a terminal in the project folder and run:  "
+                "pip install -r requirements.txt")
+        step(3, "A USB webcam or compatible camera. Camera index 0 is used by default; "
+                "change it in the Scanner tab if you have multiple cameras.")
+        step(4, "At least one recognition database downloaded from the ⬇️ Downloads tab "
+                "(see First-Time Setup below).")
+
+        h2("Optional Hardware")
+        step("A", "An Arduino-based card-sorting machine connected by USB serial. "
+                  "Configure it in the 🤖 Arduino tab.")
+
+        tip("You do not need the Arduino to use the scanner — scanning and exporting work entirely without it.")
+
+        sep()
+
+        # FIRST-TIME SETUP
+        h1("🚀  First-Time Setup")
+
+        h2("Step 1 — Download the Unified Database")
+        step(1, "Open the ⬇️ Downloads tab.")
+        step(2, "Check that the Server URL is correct (default: https://www.tcgtraders.app).")
+        step(3, "Click 'Download' next to unified_card_database.db. "
+                "This file lists every supported game and must be downloaded before individual game databases appear.")
+        tip("The unified database only needs to be downloaded once, or whenever the supported game list changes on the server.")
+
+        h2("Step 2 — Download a Game-Specific pHash Database")
+        step(1, "After the unified DB finishes, the Downloads tab populates with a button for each supported game.")
+        step(2, "Find your game (e.g. Magic: The Gathering, Pokémon, Yu-Gi-Oh!) and click its 'pHash DB' button.")
+        step(3, "A progress window will appear. Larger games (e.g. MTG with 30 000+ cards) may take a few minutes.")
+        step(4, "Once complete the database is saved to the  recognition_data/  folder next to this script and "
+                "is available immediately — no restart required.")
+        warn("If no games appear after downloading the unified DB, click 'Refresh List' on the Downloads tab.")
+
+        sep()
+
+        # SCANNING
+        h1("📷  Scanning Cards")
+
+        h2("Configure the Scanner Tab")
+        step(1, "Game — Select the card game you are scanning from the dropdown.")
+        step(2, "Match Backend — 'pHash RGB' is the default and most accurate. "
+                "'pHash Grayscale' is slightly faster but less precise.")
+        step(3, "Condition — Set the default card condition reported on export (NM, LP, MP, HP, DMG).")
+        step(4, "Language — Select the language printed on the cards.")
+        step(5, "Camera Index — Usually 0. Try 1 or 2 if your card camera is not the system default.")
+        step(6, "Auto-Save — When checked, matched cards are logged automatically without a confirmation prompt.")
+
+        h2("Start a Scan Session")
+        step(1, "Click ▶ Start in the camera panel on the left side of the window.")
+        step(2, "Place a card flat within the camera's view. The scanner detects the card outline automatically.")
+        step(3, "When a match is found, a result appears showing the card name, set, rarity, and bin assignment.")
+
+        tip("Even, diffuse lighting with no glare on the card surface gives the best results.")
+        tip("Hold the card still for a moment — the scanner waits for a stable contour before running a match.")
+        warn("If cards are consistently wrong, try re-downloading the pHash DB. "
+             "The server database may have been updated since your last download.")
+
+        sep()
+
+        # ARDUINO
+        h1("🤖  Arduino Sorter (Optional)")
+        para("The Arduino tab controls a physical card-sorting machine that routes each identified card "
+             "to a numbered bin based on game, set, rarity, foil, and/or price rules.")
+        step(1, "Connect your Arduino sorter via USB, then select its COM port from the Port dropdown.")
+        step(2, "Click 'Connect'. The status indicator turns green when the serial link is established.")
+        step(3, "Bin assignments are determined automatically from the card's attributes and sent to the Arduino.")
+        step(4, "Use the manual jog buttons (X/Y axis) in the Arduino tab to calibrate the home position.")
+        tip("If the COM port is not listed, click the refresh icon next to the Port dropdown — the device may have connected after the program started.")
+
+        sep()
+
+        # EXPORT
+        h1("📊  Exporting Your Collection")
+        step(1, "Open the 📊 Export tab.")
+        step(2, "Choose an export format: TCGTraders (for tcgtraders.app) or TCGPlayer CSV.")
+        step(3, "Click 'Export' and choose a save location. A CSV file of your scanned inventory is written.")
+        step(4, "The scan history table shows every card accepted in the current session.")
+        tip("Exports include all cards accepted since the app was launched. Restart the app to begin a fresh session.")
+
+        sep()
+
+        # TROUBLESHOOTING
+        h1("❓  Troubleshooting")
+        step("Q", "Camera shows a black screen — make sure no other application is using the camera and the correct Camera Index is selected.")
+        step("Q", "No card detected — ensure the card is well-lit, flat, and fully visible against a contrasting background.")
+        step("Q", "Match accuracy is low — verify you have downloaded the correct game's pHash DB and selected the right game in the Scanner tab.")
+        step("Q", "Download fails with SSL error — check the server URL for typos, or enable 'Bypass SSL' on the Downloads tab (only on a trusted local network).")
+        step("Q", "'No games loaded' — download unified_card_database.db from the Downloads tab first.")
+        step("Q", "Arduino not responding — confirm the COM port, verify the correct firmware is flashed, and ensure no other program (e.g. Arduino IDE Serial Monitor) has the port open.")
+
+        # bottom padding
+        tk.Frame(inner, bg='#1e1e1e', height=20).pack()
+
     def _section_label(self, parent, text):
         """Create section header"""
         tk.Label(parent, text=text, bg='#1e1e1e', fg='#4CAF50', 
@@ -1286,7 +1529,12 @@ class ScannerGUI:
         try:
             backend = self.vector_backend.get()
             use_grayscale_phash = backend == "PHASH_GRAY"
+            # Always point the scanner at the copy in recognition_data/ so it
+            # never accidentally opens or creates a blank DB in the cwd.
+            _recog_dir = os.path.join(os.path.dirname(__file__), 'recognition_data')
+            _db_path = os.path.join(_recog_dir, 'unified_card_database.db')
             self.scanner = OptimizedCardScanner(
+                db_path=_db_path,
                 max_workers=8, 
                 cache_enabled=True,
                 use_grayscale_phash=use_grayscale_phash,
