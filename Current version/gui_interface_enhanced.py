@@ -15,6 +15,7 @@ def _ensure_packages():
         "requests:requests",
         "qrcode:qrcode",
         "imagehash:imagehash",
+        "truststore:truststore",
     ]
     missing = []
     for spec in _REQUIRED:
@@ -23,23 +24,22 @@ def _ensure_packages():
             __import__(mod)
         except ImportError:
             missing.append(pkg)
-    if missing:
-        import tkinter as _tk
-        import tkinter.messagebox as _mb
-        _root = _tk.Tk()
-        _root.withdraw()
-        if _mb.askyesno(
-            "Missing Packages",
-            f"The following packages are missing and will be installed now:\n\n"
-            + "\n".join(missing)
-            + "\n\nProceed?",
-        ):
-            _root.destroy()
-            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
-        else:
-            _root.destroy()
-            sys.exit(1)
+    for pkg in missing:
+        try:
+            print(f"[startup] Installing {pkg}...", flush=True)
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--quiet", "--no-input", pkg]
+            )
+        except Exception as e:
+            print(f"[startup] Warning: could not install {pkg}: {e}", flush=True)
 _ensure_packages()
+# Inject Windows/macOS/Linux native certificate store so that HTTPS requests
+# succeed even when the server's intermediate CA is missing from certifi.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
 # ---------------------------------------------------------------------------
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -2855,7 +2855,10 @@ def main():
     root = tk.Tk()
     app = ScannerGUI(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        app.on_close()
 
 
 if __name__ == '__main__':

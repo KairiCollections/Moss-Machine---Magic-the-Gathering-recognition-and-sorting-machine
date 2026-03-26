@@ -18,6 +18,7 @@ pycparser==2.21
 six==1.16.0
 urllib3==2.1.0
 certifi>=2024.8.30
+truststore>=0.9.1
 charset-normalizer==3.3.2
 idna==3.6
 opencv-python>=4.8.0

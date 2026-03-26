@@ -11,6 +11,37 @@ Performance optimizations:
 5. In-memory hash caching for frequently scanned games
 6. Distance pre-filtering (quick rejection of bad matches)
 """
+# ---------------------------------------------------------------------------
+# Auto-install any missing required packages before importing them
+# ---------------------------------------------------------------------------
+def _ensure_packages():
+    import sys, subprocess
+    _REQUIRED = [
+        "cv2:opencv-python",
+        "numpy:numpy",
+        "PIL:Pillow",
+        "requests:requests",
+        "imagehash:imagehash",
+        "truststore:truststore",
+    ]
+    for pkg in (pkg for mod, pkg in (s.split(":") for s in _REQUIRED)
+               if not __import__('importlib').util.find_spec(mod)):
+        try:
+            print(f"[startup] Installing {pkg}...", flush=True)
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--quiet", "--no-input", pkg]
+            )
+        except Exception as e:
+            print(f"[startup] Warning: could not install {pkg}: {e}", flush=True)
+_ensure_packages()
+# Inject Windows/macOS/Linux native certificate store so HTTPS requests
+# succeed even when the server's intermediate CA is missing from certifi.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+# ---------------------------------------------------------------------------
 try:
     import cv2
 except Exception:
