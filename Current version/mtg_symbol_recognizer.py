@@ -702,15 +702,30 @@ def predict_rarity_ml(roi):
 
 
 def load_set_model():
-    """Load the set CNN model if available."""
+    """Load the set CNN model if available. Supports split-chunk files (set_cnn.part00.pt, ...)."""
     global _SET_MODEL, _SET_CLASS_MAP, _SET_IMAGE_SIZE
     if _SET_MODEL is not None:
         return _SET_MODEL
 
-    if not _TORCH_AVAILABLE or not SET_MODEL_PATH.exists():
+    if not _TORCH_AVAILABLE:
         return None
 
-    checkpoint = torch.load(SET_MODEL_PATH, map_location="cpu")
+    import io as _io
+    models_dir = SET_MODEL_PATH.parent
+
+    # Prefer reassembled chunks if present; fall back to monolithic file
+    part_files = sorted(models_dir.glob("set_cnn.part*.pt"))
+    if part_files:
+        buf = _io.BytesIO()
+        for part in part_files:
+            with open(part, 'rb') as f:
+                buf.write(f.read())
+        buf.seek(0)
+        checkpoint = torch.load(buf, map_location="cpu")
+    elif SET_MODEL_PATH.exists():
+        checkpoint = torch.load(SET_MODEL_PATH, map_location="cpu")
+    else:
+        return None
     class_to_idx = checkpoint.get("class_to_idx", {})
     idx_to_class = {v: k for k, v in class_to_idx.items()}
     _SET_CLASS_MAP = idx_to_class
