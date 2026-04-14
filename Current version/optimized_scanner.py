@@ -235,8 +235,7 @@ class OptimizedCardScanner:
         self.track_inventory = False
 
         # Matching parameters (can be adjusted by GUI at runtime)
-        self.scan_threshold = 40
-        self.quick_filter_max = 80
+        self.scan_threshold = 90
         
         # Performance stats
         self.stats = {
@@ -871,19 +870,13 @@ class OptimizedCardScanner:
                 if self.cache_enabled:
                     self.hash_cache[game_name] = cards
             
-            # Scan cards with early termination
-            match_count = 0
-            max_matches_per_game = 50  # Stop after finding 50 good matches per game to speed up multi-game scans
-            
+            # Scan all cards and collect candidates within threshold
             candidate_ids = []
             candidate_rows = []
             for card in cards:
                 if found_exact.is_set():
                     break  # Exact match found by another thread
-                
-                # Early exit if we have enough matches from this game
-                if match_count >= max_matches_per_game:
-                    break
+
 
                 # Card is a dict (from pHash DB)
                 product_id = card.get('product_id')
@@ -946,8 +939,6 @@ class OptimizedCardScanner:
                         'dist_g': dist_g,
                         'dist_b': dist_b
                     })
-                    
-                    match_count += 1
 
                     # Exact match found!
                     if avg_distance == 0:
@@ -1502,8 +1493,7 @@ class OptimizedCardScanner:
                             card_info['set'] = resolved_set
                             print(f"[+] Symbol verification matched set: {resolved_set}")
                     else:
-                        print("[!] Symbol verification failed; rejecting match")
-                        return None
+                        print("[!] Symbol verification inconclusive; keeping pHash result")
 
                 return card_info
 
@@ -1583,7 +1573,7 @@ class OptimizedCardScanner:
         if set_code in config.get('no_symbol_sets', []):
             return None
 
-        prior = config.get('sets', {}).get(set_code)
+        prior = config.get('sets', {}).get(set_code) or config.get('default')
         if not prior:
             return None
 
@@ -1591,22 +1581,19 @@ class OptimizedCardScanner:
             self._mtg_symbols = load_set_symbols()
 
         # Normalize promo-style set codes (e.g., PPELD -> ELD) if needed
-        if (not prior) or (set_code not in self._mtg_symbols):
+        if set_code not in self._mtg_symbols:
             normalized = self._normalize_mtg_set_code(set_code, config)
             if normalized and normalized != set_code:
                 print(f"[!] Normalized set code for symbol check: {set_code} -> {normalized}")
                 set_code = normalized
-                prior = config.get('sets', {}).get(set_code)
+                prior = config.get('sets', {}).get(set_code) or prior
 
-        if (not prior) or (set_code not in self._mtg_symbols):
+        if set_code not in self._mtg_symbols:
             resolved = self._resolve_symbol_set_from_name(card_name, config)
             if resolved and resolved != set_code:
                 print(f"[!] Resolved symbol set from name: {set_code} -> {resolved}")
                 set_code = resolved
-                prior = config.get('sets', {}).get(set_code)
-
-        if not self._mtg_symbols or set_code not in self._mtg_symbols:
-            return None
+                prior = config.get('sets', {}).get(set_code) or prior
 
         h, w = image_bgr.shape[:2]
         px1 = max(0, int(prior[0] * w))
@@ -1624,8 +1611,8 @@ class OptimizedCardScanner:
             set_only=True,
             search_all_sets=False,
             quiet=True,
-            allow_ml_set=False,
-            allow_ml=False
+            allow_ml_set=True,
+            allow_ml=True
         )
 
         if not match:
@@ -1672,7 +1659,7 @@ class OptimizedCardScanner:
             sc = str(set_code).upper()
             if sc in config.get('no_symbol_sets', []):
                 continue
-            if sc in config.get('sets', {}) and sc in (self._mtg_symbols or {}):
+            if sc in config.get('sets', {}):
                 candidate_sets.append(sc)
 
         if not candidate_sets:
@@ -1701,8 +1688,8 @@ class OptimizedCardScanner:
                 set_only=True,
                 search_all_sets=False,
                 quiet=True,
-                allow_ml_set=False,
-                allow_ml=False
+                allow_ml_set=True,
+                allow_ml=True
             )
 
             if not match:
@@ -1743,7 +1730,7 @@ class OptimizedCardScanner:
             if not set_code:
                 continue
             sc = str(set_code).upper()
-            if sc in config.get('sets', {}) and sc in (self._mtg_symbols or {}):
+            if sc in config.get('sets', {}):
                 return sc
 
         return None
@@ -1771,7 +1758,7 @@ class OptimizedCardScanner:
         candidates = [c for c in candidates if not (c in seen or seen.add(c))]
 
         for cand in candidates:
-            if cand in config.get('sets', {}) and cand in (self._mtg_symbols or {}):
+            if cand in config.get('sets', {}):
                 return cand
 
         return None

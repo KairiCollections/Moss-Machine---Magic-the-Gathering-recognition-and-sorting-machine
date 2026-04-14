@@ -27,7 +27,7 @@ try:
     import torch.nn as nn
     from torchvision import models
     _TORCH_AVAILABLE = True
-except Exception:
+except BaseException:
     _TORCH_AVAILABLE = False
 
 # Configuration
@@ -888,7 +888,17 @@ def match_symbol_template(roi, symbols, true_set_code=None, set_only=False, sear
         if not quiet:
             print(f"\nTrying to match against {true_set_code} symbols: {list(search_sets[true_set_code].keys())}")
     else:
-        # Set not found - cannot match without templates
+        # Set not found in templates - try ML-only fallback if allowed
+        if allow_ml:
+            ml_rarity, ml_rarity_conf = predict_rarity_ml(roi)
+            ml_set, ml_set_conf = predict_set_ml(roi)
+            result_set = ml_set if ml_set else true_set_code
+            result_rarity = ml_rarity
+            result_conf = float(ml_set_conf) if ml_set else 0.0
+            if not quiet:
+                print(f"\n  ML-only (no templates): set={result_set} ({ml_set_conf:.2f}), rarity={result_rarity} ({ml_rarity_conf:.2f})")
+            if result_conf > 0 or result_rarity:
+                return {'set_code': result_set, 'rarity': result_rarity, 'confidence': result_conf, 'best_score': result_conf, 'margin': None}
         if not quiet:
             if true_set_code:
                 print(f"\n[NO] Set code '{true_set_code}' not found in available templates")

@@ -174,8 +174,7 @@ class ScannerGUI:
         self.vector_backend = tk.StringVar(value="PHASH_RGB")
 
         # Matching strictness controls (adjustable via GUI)
-        self.match_threshold_var = tk.IntVar(value=40)
-        self.quick_filter_var = tk.IntVar(value=80)
+        self.match_threshold_var = tk.IntVar(value=90)
         
         # Arduino monitoring
         self.arduino_monitoring = False
@@ -265,7 +264,10 @@ class ScannerGUI:
         # Tab 6: Downloads (server-hosted recognition DBs)
         downloads_tab = tk.Frame(self.notebook, bg='#1e1e1e')
         self.notebook.add(downloads_tab, text='⬇️ Downloads')
-        self._setup_downloads_tab(downloads_tab)
+        try:
+            self._setup_downloads_tab(downloads_tab)
+        except Exception as _e:
+            tk.Label(downloads_tab, text=f"Downloads tab error: {_e}", bg='#1e1e1e', fg='#ff4444').pack(pady=20)
 
         # Tab 7: Tutorial / How To Use
         tutorial_tab = tk.Frame(self.notebook, bg='#1e1e1e')
@@ -410,22 +412,16 @@ class ScannerGUI:
         threshold_spin = tk.Spinbox(match_frame, from_=1, to=512, textvariable=self.match_threshold_var, width=6)
         threshold_spin.pack(side=tk.LEFT, padx=6)
 
-        tk.Label(match_frame, text="Quick Filter Max:", bg='#1a1a1a', fg='#fff', font=('Arial', 9)).pack(side=tk.LEFT, padx=(12,0))
-        quick_spin = tk.Spinbox(match_frame, from_=1, to=512, textvariable=self.quick_filter_var, width=6)
-        quick_spin.pack(side=tk.LEFT, padx=6)
-
         # Update scanner settings when values change (if scanner initialized)
         def _apply_match_settings(*args):
             try:
                 if self.scanner:
                     self.scanner.scan_threshold = int(self.match_threshold_var.get())
-                    self.scanner.quick_filter_max = int(self.quick_filter_var.get())
             except Exception:
                 pass
 
         # Trace changes
         self.match_threshold_var.trace_add('write', _apply_match_settings)
-        self.quick_filter_var.trace_add('write', _apply_match_settings)
         
         # Sorting mode (dropdown)
         self._section_label(frame, "SORTING MODE")
@@ -881,56 +877,56 @@ class ScannerGUI:
     def _setup_downloads_tab(self, parent):
         """Setup Downloads tab for fetching recognition DBs from server"""
         frame = tk.Frame(parent, bg='#1e1e1e')
-        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
 
-        tk.Label(frame, text="⬇️ Download Recognition Databases", bg='#1e1e1e', fg='#ffffff',
-                font=('Segoe UI', 14, 'bold')).pack(pady=(0, 8))
+        # ── top controls row ──────────────────────────────────────────────
+        top = tk.Frame(frame, bg='#1e1e1e')
+        top.pack(fill=tk.X, pady=(0, 4))
 
-        # Server URL
-        srv_frame = tk.Frame(frame, bg='#1e1e1e')
-        srv_frame.pack(fill=tk.X, pady=4)
-        tk.Label(srv_frame, text="Server:", bg='#1e1e1e', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT)
-        # Default to local server for LAN use; user can change to public host if desired
+        tk.Label(top, text="Server:", bg='#1e1e1e', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT)
         self.download_server_var = tk.StringVar(value="https://www.tcgtraders.app:443")
-        tk.Entry(srv_frame, textvariable=self.download_server_var, width=60, bg='#404040', fg='#fff', insertbackground='#fff').pack(side=tk.LEFT, padx=8)
-        tk.Button(srv_frame, text="Refresh List", command=self._refresh_download_list, bg='#2196F3', fg='white').pack(side=tk.LEFT, padx=6)
-
-        # TLS options: optional CA bundle path and allow self-signed
-        tls_frame = tk.Frame(frame, bg='#1e1e1e')
-        tls_frame.pack(fill=tk.X, pady=(6,4))
-        tk.Label(tls_frame, text="CA bundle (optional):", bg='#1e1e1e', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT)
-        self.ca_bundle_var = tk.StringVar(value="")
-        tk.Entry(tls_frame, textvariable=self.ca_bundle_var, width=48, bg='#404040', fg='#fff', insertbackground='#fff').pack(side=tk.LEFT, padx=8)
+        tk.Entry(top, textvariable=self.download_server_var, width=44, bg='#404040', fg='#fff',
+                 insertbackground='#fff', font=('Arial', 9)).pack(side=tk.LEFT, padx=6)
         self.allow_self_signed_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(tls_frame, text="Bypass SSL (not recommended)", variable=self.allow_self_signed_var, bg='#1e1e1e', fg='#fff', selectcolor='#2b2b2b').pack(side=tk.LEFT, padx=8)
+        tk.Checkbutton(top, text="Bypass SSL", variable=self.allow_self_signed_var,
+                       bg='#1e1e1e', fg='#aaa', selectcolor='#2b2b2b', font=('Arial', 8)).pack(side=tk.LEFT, padx=4)
+        self.ca_bundle_var = tk.StringVar(value="")
+        tk.Button(top, text="↺ Refresh", command=self._refresh_download_list,
+                  bg='#2196F3', fg='white', font=('Arial', 9), padx=8).pack(side=tk.RIGHT)
 
-        # Downloads area (common files + per-game buttons)
-        downloads_area = tk.Frame(frame, bg='#1e1e1e')
-        downloads_area.pack(fill=tk.BOTH, expand=True, pady=8)
+        # ── unified DB row ────────────────────────────────────────────────
+        db_row = tk.Frame(frame, bg='#1a1a1a', relief=tk.SUNKEN, bd=1)
+        db_row.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(db_row, text="unified_card_database.db", bg='#1a1a1a', fg='#fff',
+                 font=('Arial', 9)).pack(side=tk.LEFT, padx=8, pady=4)
+        tk.Button(db_row, text="⬇ Download", bg='#4CAF50', fg='white', font=('Arial', 9),
+                  command=lambda: self._start_download('unified_card_database.db')).pack(side=tk.RIGHT, padx=8, pady=4)
 
-        # Common files container
-        self.common_frame = tk.Frame(downloads_area, bg='#1e1e1e')
-        self.common_frame.pack(fill=tk.X, pady=(0,8))
-
-        # Per-game files container (scrollable)
-        pg_container = tk.Frame(downloads_area, bg='#1e1e1e')
+        # ── scrollable game grid ──────────────────────────────────────────
+        pg_container = tk.Frame(frame, bg='#1e1e1e')
         pg_container.pack(fill=tk.BOTH, expand=True)
 
         pg_canvas = tk.Canvas(pg_container, bg='#1e1e1e', highlightthickness=0)
         pg_scroll = ttk.Scrollbar(pg_container, orient='vertical', command=pg_canvas.yview)
         self.games_frame = tk.Frame(pg_canvas, bg='#1e1e1e')
         self.games_frame.bind('<Configure>', lambda e: pg_canvas.configure(scrollregion=pg_canvas.bbox('all')))
-        pg_canvas.create_window((0,0), window=self.games_frame, anchor='nw')
+        pg_canvas.create_window((0, 0), window=self.games_frame, anchor='nw')
         pg_canvas.configure(yscrollcommand=pg_scroll.set)
         pg_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         pg_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # mouse-wheel scrolling
+        pg_canvas.bind('<Enter>', lambda e: pg_canvas.bind_all('<MouseWheel>',
+            lambda ev: pg_canvas.yview_scroll(int(-1 * (ev.delta / 120)), 'units')))
+        pg_canvas.bind('<Leave>', lambda e: pg_canvas.unbind_all('<MouseWheel>'))
 
-        # Status
+        # ── status bar ────────────────────────────────────────────────────
         self.download_status_label = tk.Label(frame, text="", bg='#1e1e1e', fg='#4CAF50', font=('Arial', 9))
-        self.download_status_label.pack(pady=6)
+        self.download_status_label.pack(pady=(4, 0))
 
-        # Populate initial buttons
-        self._refresh_download_list()
+        try:
+            self._refresh_download_list()
+        except Exception:
+            pass
 
     def _start_download(self, filename):
         """Start a download for a given filename (spawns thread)."""
@@ -957,69 +953,90 @@ class ScannerGUI:
         thr.start()
 
     def _refresh_download_list(self):
-        """Populate download list with common files and per-game files if available"""
-        # Clear common and games frames
-        for child in self.common_frame.winfo_children():
-            child.destroy()
-        for child in self.games_frame.winfo_children():
-            child.destroy()
-
-        common = [
-            'unified_card_database.db'
-        ]
-        # Add common download buttons
-        for f in common:
-            row = tk.Frame(self.common_frame, bg='#1e1e1e')
-            row.pack(fill=tk.X, pady=2)
-            tk.Label(row, text=f, bg='#1e1e1e', fg='#fff').pack(side=tk.LEFT, padx=8)
-            tk.Button(row, text='Download', bg='#4CAF50', fg='white', command=(lambda fn=f: self._start_download(fn))).pack(side=tk.RIGHT, padx=8)
-
-        # Populate per-game download buttons only for games allowed by unified DB (games.load = 1)
+        """Populate game grid with one button per game (3-column grid)."""
         try:
-            allowed = set(getattr(self, 'allowed_game_ids', set()))
-            if allowed:
-                # Primary: use scanner.games if available
-                scanner_games = self.scanner and getattr(self.scanner, 'games', None)
-                if scanner_games:
-                    game_rows = []
-                    for game_key, info in sorted(scanner_games.items(), key=lambda x: x[0]):
-                        display = info.get('display_name') or game_key
-                        gid = str(info.get('id') or self.HARD_CODE_GAME_IDS.get(display, game_key))
-                        game_rows.append((display, gid))
-                else:
-                    # Fallback: read names/ids directly from unified DB so buttons show
-                    # even before any game has been selected or the scanner loaded
-                    game_rows = []
-                    unified_path = getattr(self, 'unified_db_path', None) or os.path.join(
-                        os.path.dirname(__file__), 'recognition_data', 'unified_card_database.db')
-                    if os.path.exists(unified_path):
-                        try:
-                            conn = sqlite3.connect(unified_path)
-                            cur = conn.cursor()
-                            cur.execute("PRAGMA table_info(games)")
-                            cols = [r[1] for r in cur.fetchall()]
-                            id_col = next((c for c in ('id', 'game_id', 'game') if c in cols), None)
-                            name_col = next((c for c in ('name', 'display_name', 'game_name') if c in cols), None)
-                            if id_col and name_col:
-                                cur.execute(f"SELECT {id_col}, {name_col} FROM games WHERE load = 1 ORDER BY {name_col}")
-                                for row in cur.fetchall():
-                                    game_rows.append((str(row[1]), str(row[0])))
-                            conn.close()
-                        except Exception:
-                            pass
+            games_frame = self.games_frame
+        except AttributeError:
+            return  # tab not yet set up
+        for child in games_frame.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
 
-                for display, gid in game_rows:
-                    if gid not in allowed:
-                        continue
-                    gf = tk.Frame(self.games_frame, bg='#111111', relief=tk.RAISED, bd=1)
-                    gf.pack(fill=tk.X, pady=4, padx=6)
-                    lbl = tk.Label(gf, text=f"{display}", bg='#111111', fg='#fff')
-                    lbl.pack(side=tk.LEFT, padx=8)
-                    # phash
-                    tk.Button(gf, text='pHash DB', bg='#2196F3', fg='white', width=10,
-                              command=(lambda fn=f"phash_cards_{gid}.db": self._start_download(fn))).pack(side=tk.RIGHT, padx=6)
-        except Exception:
-            pass
+        # Build game list ------------------------------------------------
+        game_rows = []  # list of (display_name, game_id_str)
+        allowed = set(getattr(self, 'allowed_game_ids', set()))
+
+        scanner_games = self.scanner and getattr(self.scanner, 'games', None)
+        if scanner_games:
+            for game_key, info in sorted(scanner_games.items(), key=lambda x: x[0]):
+                display = info.get('display_name') or game_key
+                gid = str(info.get('id') or self.HARD_CODE_GAME_IDS.get(display, game_key))
+                game_rows.append((display, gid))
+        else:
+            unified_path = getattr(self, 'unified_db_path', None) or os.path.join(
+                os.path.dirname(__file__), 'recognition_data', 'unified_card_database.db')
+            if os.path.exists(unified_path):
+                try:
+                    conn = sqlite3.connect(unified_path)
+                    cur = conn.cursor()
+                    cur.execute("PRAGMA table_info(games)")
+                    cols = [r[1] for r in cur.fetchall()]
+                    id_col = next((c for c in ('id', 'game_id', 'game') if c in cols), None)
+                    name_col = next((c for c in ('name', 'display_name', 'game_name') if c in cols), None)
+                    if id_col and name_col:
+                        cur.execute(f"SELECT {id_col}, {name_col} FROM games WHERE load = 1 ORDER BY {name_col}")
+                        for row in cur.fetchall():
+                            game_rows.append((str(row[1]), str(row[0])))
+                    conn.close()
+                except Exception:
+                    pass
+
+        if allowed:
+            game_rows = [(d, g) for d, g in game_rows if g in allowed]
+
+        if not game_rows:
+            tk.Label(games_frame, text="Download unified_card_database.db first, then click \u21ba Refresh",
+                     bg='#1e1e1e', fg='#888', font=('Arial', 9), wraplength=500).grid(
+                         row=0, column=0, columnspan=3, pady=20, padx=10)
+            return
+
+        # Render 3-column grid -------------------------------------------
+        COLS = 3
+        for idx, (display, gid) in enumerate(game_rows):
+            row_i, col_i = divmod(idx, COLS)
+            # check if already downloaded
+            try:
+                local = os.path.join(os.path.dirname(__file__), 'recognition_data', f'phash_cards_{gid}.db')
+                have = os.path.exists(local)
+            except Exception:
+                have = False
+            btn_bg = '#1a472a' if have else '#1e3a5f'
+            btn_fg = '#88ff88' if have else '#ffffff'
+            label = f"{display}\n{'downloaded' if have else 'pHash DB'}"
+            try:
+                btn = tk.Button(
+                    games_frame,
+                    text=label,
+                    bg=btn_bg, fg=btn_fg,
+                    font=('Arial', 8),
+                    width=20, height=2,
+                    wraplength=130,
+                    justify=tk.CENTER,
+                    relief=tk.RAISED, bd=1,
+                    cursor='hand2',
+                    command=(lambda fn=f'phash_cards_{gid}.db': self._start_download(fn))
+                )
+                btn.grid(row=row_i, column=col_i, padx=4, pady=4, sticky='nsew')
+            except Exception:
+                pass
+
+        for c in range(COLS):
+            try:
+                games_frame.columnconfigure(c, weight=1)
+            except Exception:
+                pass
 
     def _prune_hardcoded_map(self):
         """Remove entries from HARD_CODE_GAME_IDS where games.load = 0 in the unified DB."""
@@ -1549,7 +1566,6 @@ class ScannerGUI:
             # Apply initial match settings from GUI
             try:
                 self.scanner.scan_threshold = int(self.match_threshold_var.get())
-                self.scanner.quick_filter_max = int(self.quick_filter_var.get())
             except Exception:
                 pass
             self.update_vector_backend()
