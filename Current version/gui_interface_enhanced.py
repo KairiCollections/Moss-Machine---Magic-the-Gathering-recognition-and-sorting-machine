@@ -2453,20 +2453,25 @@ class ScannerGUI:
             self._last_display_frame = None
         except Exception:
             pass
-        # Close plugin or OpenCV camera
+        # Release the camera immediately so any blocking camera.read() in the
+        # background thread returns (False, None) right away — on Windows,
+        # release() unblocks a pending read(). Null out self.camera first so the
+        # background thread's cleanup won't double-release.
         if getattr(self, 'camera_plugin', None):
+            plugin = self.camera_plugin
+            self.camera_plugin = None
             try:
-                self.camera_plugin.close()
+                plugin.close()
             except Exception:
                 pass
-            self.camera_plugin = None
         else:
-            if getattr(self, 'camera', None):
+            cam = getattr(self, 'camera', None)
+            self.camera = None
+            if cam is not None:
                 try:
-                    self.camera.release()
+                    cam.release()
                 except Exception:
                     pass
-                self.camera = None
         self.start_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.DISABLED)
         self.log_status("⏸ Camera stopped")
@@ -2481,7 +2486,14 @@ class ScannerGUI:
                     ret = False
                     frame = None
             else:
-                ret, frame = self.camera.read()
+                cam = getattr(self, 'camera', None)
+                if cam is None:
+                    break  # stop_camera released the camera
+                try:
+                    ret, frame = cam.read()
+                except Exception:
+                    ret = False
+                    frame = None
             if not ret:
                 break
             
@@ -2553,6 +2565,31 @@ class ScannerGUI:
                 self._update_canvas(display_frame)
 
             time.sleep(0.03)
+
+        # Loop exited — release any remaining resources (stop_camera may have already done this).
+        if getattr(self, 'camera_plugin', None):
+            plugin = self.camera_plugin
+            self.camera_plugin = None
+            try:
+                plugin.close()
+            except Exception:
+                pass
+        else:
+            cam = getattr(self, 'camera', None)
+            self.camera = None
+            if cam is not None:
+                try:
+                    cam.release()
+                except Exception:
+                    pass
+        # Ensure buttons are in the correct state regardless of why the loop stopped.
+        try:
+            self.root.after(0, lambda: [
+                self.start_btn.configure(state=tk.NORMAL),
+                self.stop_btn.configure(state=tk.DISABLED),
+            ])
+        except Exception:
+            pass
 
     def _normalize_brightness(self, frame):
         """Normalize brightness using HSV median scaling to reduce flashes between frames."""

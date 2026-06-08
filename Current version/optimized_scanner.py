@@ -15,7 +15,7 @@ Performance optimizations:
 # Auto-install any missing required packages before importing them
 # ---------------------------------------------------------------------------
 def _ensure_packages():
-    import sys, subprocess
+    import sys, subprocess, importlib.util
     _REQUIRED = [
         "cv2:opencv-python",
         "numpy:numpy",
@@ -23,9 +23,10 @@ def _ensure_packages():
         "requests:requests",
         "imagehash:imagehash",
         "truststore:truststore",
+        "serial:pyserial",
     ]
     for pkg in (pkg for mod, pkg in (s.split(":") for s in _REQUIRED)
-               if not __import__('importlib').util.find_spec(mod)):
+               if not importlib.util.find_spec(mod)):
         try:
             print(f"[startup] Installing {pkg}...", flush=True)
             subprocess.check_call(
@@ -95,20 +96,19 @@ def download_database(db_path="unified_card_database.db"):
             import urllib.request
             import ssl
 
-            if server_url.startswith("http://"):
-                context = None
-            else:
-                context = ssl._create_unverified_context()
-
             def reporthook(count, block_size, total_size):
                 if total_size > 0:
                     percent = int(count * block_size * 100 / total_size)
                     print(f"\r[*] Downloading: {percent}%", end='', flush=True)
 
-            if context:
-                urllib.request.urlretrieve(server_url, str(target_path), reporthook=reporthook, context=context)
-            else:
-                urllib.request.urlretrieve(server_url, str(target_path), reporthook=reporthook)
+            if server_url.startswith("https://"):
+                context = ssl._create_unverified_context()
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPSHandler(context=context)
+                )
+                urllib.request.install_opener(opener)
+
+            urllib.request.urlretrieve(server_url, str(target_path), reporthook=reporthook)
 
             print(f"\n[+] Successfully downloaded database from {server_url}")
             return True
@@ -275,6 +275,9 @@ class OptimizedCardScanner:
     
     def init_serial(self):
         """Initialize serial connection to Arduino"""
+        if serial is None:
+            print("[!] pyserial is not installed. Run: pip install pyserial")
+            return False
         if not self.serial_port:
             print("[!] Serial port not configured")
             return False
@@ -283,7 +286,10 @@ class OptimizedCardScanner:
             # Set a read timeout so recv operations don't block forever
             self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=5)
             print(f"[+] Serial port {self.serial_port} opened (Baudrate: {self.baud_rate})")
-            self.wait_for_arduino()
+            if not self.wait_for_arduino():
+                self.ser.close()
+                self.ser = None
+                return False
             return True
         except Exception as e:
             print(f"[!] Failed to open serial port: {e}")
@@ -345,22 +351,23 @@ class OptimizedCardScanner:
         return ck
     
     def wait_for_arduino(self, timeout=10):
-        """Wait for Arduino ready signal with a timeout (seconds)."""
+        """Wait for Arduino ready signal with a timeout (seconds). Returns True if ready, False on timeout."""
         if not self.ser:
-            return
+            return False
 
         deadline = time.time() + timeout
         msg = ""
         while "Arduino is ready" not in msg:
             if time.time() > deadline:
                 print("[!] Timed out waiting for Arduino ready signal")
-                break
+                return False
             if self.ser.in_waiting == 0:
                 time.sleep(0.05)
                 continue
             msg = self.recv_from_arduino()
             if msg:
                 print(f"[<-] Arduino: {msg}")
+        return True
     
     # =====================================================================
     # SORTING & BIN ASSIGNMENT
@@ -1835,6 +1842,8 @@ def print_sorting_options():
     print("6 - Buy mode:   Sort by price with custom threshold")
     print("=" * 60)
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
 def main():
     import sys
     import argparse
@@ -1868,7 +1877,11 @@ def main():
     print("=" * 80)
     
     # Initialize with 8 worker threads
+    _default_db = _SCRIPT_DIR / 'recognition_data' / 'unified_card_database.db'
+    if not _default_db.exists():
+        _default_db = _SCRIPT_DIR / 'unified_card_database.db'
     scanner = OptimizedCardScanner(
+        db_path=str(_default_db),
         max_workers=8,
         cache_enabled=True,
         serial_port=args.serial_port,
