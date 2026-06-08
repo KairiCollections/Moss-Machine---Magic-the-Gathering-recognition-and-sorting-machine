@@ -344,15 +344,20 @@ class OptimizedCardScanner:
 
         return ck
     
-    def wait_for_arduino(self):
-        """Wait for Arduino ready signal"""
+    def wait_for_arduino(self, timeout=10):
+        """Wait for Arduino ready signal with a timeout (seconds)."""
         if not self.ser:
             return
-        
+
+        deadline = time.time() + timeout
         msg = ""
         while "Arduino is ready" not in msg:
-            while self.ser.in_waiting == 0:
-                pass
+            if time.time() > deadline:
+                print("[!] Timed out waiting for Arduino ready signal")
+                break
+            if self.ser.in_waiting == 0:
+                time.sleep(0.05)
+                continue
             msg = self.recv_from_arduino()
             if msg:
                 print(f"[<-] Arduino: {msg}")

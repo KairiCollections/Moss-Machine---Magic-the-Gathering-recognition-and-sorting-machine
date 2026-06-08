@@ -1872,49 +1872,61 @@ class ScannerGUI:
         self.scanner.baud_rate = baud
         self.log_status(f"Connecting to Arduino on {port} @ {baud}...")
 
-        # Prefer Arduino plugin if available
-        ok = False
+        # Disable button while connecting to prevent double-clicks
         try:
-            if getattr(self, 'arduino_plugin', None):
-                try:
-                    ok = bool(self.arduino_plugin.connect(port, baud))
-                except Exception:
-                    ok = False
+            self.connect_btn.configure(text="Connecting…", state=tk.DISABLED, bg='#FF9800')
+        except Exception:
+            pass
 
-            # Fallback to scanner's serial implementation
-            if not ok:
-                try:
-                    ok = bool(self.scanner.init_serial())
-                except Exception as e:
-                    self.log_status(f"Arduino connection error: {e}", error=True)
-                    ok = False
-        except Exception as e:
-            self.log_status(f"Arduino connection error: {e}", error=True)
+        def _do_connect():
             ok = False
-
-        if ok:
-            self.log_status("✓ Arduino connected")
             try:
-                self.connect_btn.configure(text="Connected", state=tk.DISABLED, bg='#4CAF50')
-            except Exception:
-                pass
+                if getattr(self, 'arduino_plugin', None):
+                    try:
+                        ok = bool(self.arduino_plugin.connect(port, baud))
+                    except Exception:
+                        ok = False
 
-            # Default to STOPPED state after connect
-            self.machine_started = False
-            self.machine_state_label.configure(text="● STOPPED", fg='#ff4444')
-            self.start_machine_btn.configure(state=tk.NORMAL)
-            self.stop_machine_btn.configure(state=tk.DISABLED)
-            self._update_controls_state()
-        else:
-            self.log_status("✗ Failed to connect to Arduino", error=True)
-            messagebox.showerror(
-                "Arduino",
-                "Failed to connect to Arduino.\n\n"
-                "- Verify the COM port\n"
-                "- Verify baud rate\n"
-                "- Ensure Arduino is plugged in\n"
-                "- Ensure pyserial is installed"
-            )
+                if not ok:
+                    try:
+                        ok = bool(self.scanner.init_serial())
+                    except Exception as e:
+                        self.root.after(0, lambda err=e: self.log_status(f"Arduino connection error: {err}", error=True))
+                        ok = False
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log_status(f"Arduino connection error: {err}", error=True))
+                ok = False
+
+            def _on_done(success):
+                if success:
+                    self.log_status("✓ Arduino connected")
+                    try:
+                        self.connect_btn.configure(text="Connected", state=tk.DISABLED, bg='#4CAF50')
+                    except Exception:
+                        pass
+                    self.machine_started = False
+                    self.machine_state_label.configure(text="● STOPPED", fg='#ff4444')
+                    self.start_machine_btn.configure(state=tk.NORMAL)
+                    self.stop_machine_btn.configure(state=tk.DISABLED)
+                    self._update_controls_state()
+                else:
+                    self.log_status("✗ Failed to connect to Arduino", error=True)
+                    try:
+                        self.connect_btn.configure(text="Connect", state=tk.NORMAL, bg='#FF9800')
+                    except Exception:
+                        pass
+                    messagebox.showerror(
+                        "Arduino",
+                        "Failed to connect to Arduino.\n\n"
+                        "- Verify the COM port\n"
+                        "- Verify baud rate\n"
+                        "- Ensure Arduino is plugged in\n"
+                        "- Ensure pyserial is installed"
+                    )
+
+            self.root.after(0, lambda: _on_done(ok))
+
+        threading.Thread(target=_do_connect, daemon=True).start()
 
     def start_machine(self):
         """Start the machine - disable manual controls"""
