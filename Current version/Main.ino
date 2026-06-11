@@ -3,6 +3,33 @@
 #include <Wire.h>
 #include "Adafruit_VL6180X.h"
 
+// ============================================================
+// ERROR CODES — mirrors error_codes.py on the PC side
+// Format: <Error,EXXX,short description>
+// ============================================================
+#define EC_TOF_NOT_FOUND      "E501"   // ToF sensor not found on I2C
+#define EC_TOF_SYS_ERR        "E502"   // ToF system error
+#define EC_TOF_ECE            "E503"   // ToF ECE failure
+#define EC_TOF_NO_CONVERGE    "E504"   // ToF no convergence
+#define EC_PICKUP_RETRY       "E505"   // Pickup retry limit reached
+#define EC_OVERFLOW_FULL      "E506"   // Overflow tray full
+#define EC_CMD_NOT_STARTED    "E507"   // Tray command rejected: machine stopped
+#define EC_CMD_STARTED        "E508"   // Manual command rejected: machine running
+#define EC_NOT_AT_HOME        "E509"   // Parameter change rejected: not at home
+#define EC_HOME_X_FAIL        "E510"   // Homing failed: X endstop
+#define EC_HOME_Y_FAIL        "E511"   // Homing failed: Y endstop
+#define EC_HOME_Z_FAIL        "E512"   // Homing failed: Z endstop
+#define EC_BUF_OVERFLOW        "E513"   // Serial buffer overflow / truncation
+#define EC_UNKNOWN_CMD         "E514"   // Unrecognised command received
+
+// Helper macro: sends a structured error over serial and shows code on LCD line 2
+// Usage: REPORT_ERROR(EC_TOF_NOT_FOUND, "No ToF sensor")
+#define REPORT_ERROR(code, msg) \
+  do { \
+    Serial.println("<Error," + String(code) + "," + String(msg) + ">"); \
+    lcd.setCursor(0, 1); lcd.print(String(code) + " " + String(msg).substring(0, 11)); \
+  } while(0)
+
 //Pin Definitions for hardware control
 enum Pins { 
     Zmin = 18, Xmin = 3, Ymin = 14, Xmax = 2, Ymax = 15, Zmax = 19, //Endstops
@@ -70,8 +97,8 @@ void setup() {
   while (!Serial) { delay(10); }             //Wait for serial to be ready
   Serial.println("Adafruit VL6180x test!");  //Print sensor initialization message
   while (!vl.begin()) {
-    Serial.println("Failed to find sensor");
-    PrintLCD("Failed to find ", "ToF sensor"); //Display error on LCD if sensor not found
+    REPORT_ERROR(EC_TOF_NOT_FOUND, "No ToF sensor");
+    PrintLCD("E501 No ToF", "Check I2C wiring");
     delay(1000);
   }  
   Serial.println("Sensor found!");PrintLCD("ToF sensor", "found");
@@ -89,15 +116,24 @@ void loop() {
   if (status == VL6180X_ERROR_NONE) {ReadRange(1); Serial.print("Range: "); Serial.println((range[0] + range[1]) / 2);
   } else {PrintLCD("ToF: No range", " ");}
   switch (status) { //Various errors that can happen with the range sensor
-    case VL6180X_ERROR_SYSERR_1 ... VL6180X_ERROR_SYSERR_5: Serial.println("System error"); break;
-    case VL6180X_ERROR_ECEFAIL: Serial.println("ECE failure"); PrintLCD("ECE failure", " ");break;
-    case VL6180X_ERROR_NOCONVERGE: Serial.println("No convergence"); PrintLCD("No convergence", " "); break;
-    case VL6180X_ERROR_RANGEIGNORE: Serial.println("Ignoring range"); PrintLCD("Ignoring range", " "); break;
-    case VL6180X_ERROR_SNR: Serial.println("Signal/Noise error"); PrintLCD("Signal/Noise", "error"); break;
-    case VL6180X_ERROR_RAWUFLOW: Serial.println("Raw reading underflow"); PrintLCD("Raw reading", "underflow"); break;
-    case VL6180X_ERROR_RAWOFLOW: Serial.println("Raw reading overflow"); PrintLCD("Raw reading", "overflow"); break;
-    case VL6180X_ERROR_RANGEUFLOW: Serial.println("Range reading underflow"); PrintLCD("Range reading", "underflow"); break;
-    case VL6180X_ERROR_RANGEOFLOW: Serial.println("Range reading overflow"); PrintLCD("Range reading", "overflow"); break;
+    case VL6180X_ERROR_SYSERR_1 ... VL6180X_ERROR_SYSERR_5:
+      REPORT_ERROR(EC_TOF_SYS_ERR, "System error"); break;
+    case VL6180X_ERROR_ECEFAIL:
+      REPORT_ERROR(EC_TOF_ECE, "ECE failure"); break;
+    case VL6180X_ERROR_NOCONVERGE:
+      REPORT_ERROR(EC_TOF_NO_CONVERGE, "No convergence"); break;
+    case VL6180X_ERROR_RANGEIGNORE:
+      Serial.println("<Info,E504,Ignoring range>"); break;
+    case VL6180X_ERROR_SNR:
+      REPORT_ERROR(EC_TOF_SYS_ERR, "Signal/Noise err"); break;
+    case VL6180X_ERROR_RAWUFLOW:
+      REPORT_ERROR(EC_TOF_SYS_ERR, "Raw underflow"); break;
+    case VL6180X_ERROR_RAWOFLOW:
+      REPORT_ERROR(EC_TOF_SYS_ERR, "Raw overflow"); break;
+    case VL6180X_ERROR_RANGEUFLOW:
+      REPORT_ERROR(EC_TOF_SYS_ERR, "Range underflow"); break;
+    case VL6180X_ERROR_RANGEOFLOW:
+      REPORT_ERROR(EC_TOF_SYS_ERR, "Range overflow"); break;
     default: break;
   }
   lcd.init();lcd.backlight();lcd.setCursor(0, 0); //Initialize LCD and turn on the backlight
@@ -130,7 +166,10 @@ void getDataFromPC() {
     if (readInProgress) {
       inputBuffer[bytesRecvd] = x;
       bytesRecvd++;  //Data is still being read
-      if (bytesRecvd == buffSize) { bytesRecvd = buffSize - 1; } //Prevent buffer overflow
+      if (bytesRecvd == buffSize) {
+        bytesRecvd = buffSize - 1; //Prevent buffer overflow
+        REPORT_ERROR(EC_BUF_OVERFLOW, "Cmd truncated");
+      }
     }  
     if (x == startMarker) { //Start marker received, begin reading
       bytesRecvd = 0;
@@ -156,19 +195,53 @@ retrypickup:
     while ((range[2] + range[3]) / 2 < release_threshold) {digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);}//Check range and if card didn't drop retry
     MotorsOnOff(0);delay(100);Move1(1, steps, zespeed);} //Turn motors back on and move back up
   if (Release == 0) {digitalWrite(Vacuum1, 1);delay(500);digitalWrite(Vacuum1, 0);Move1(1, steps, zespeed);}ReadRange(3);//Vacuum to pick up card
-    if (((range[2] + range[3]) / 2) > pickup_threshold) {PickupRetry++;if (PickupRetry >= 10) {StopMachine();} else {goto retrypickup;}}//If 10 retrys failed stop the machine
+    if (((range[2] + range[3]) / 2) > pickup_threshold) {
+      PickupRetry++;
+      if (PickupRetry >= 10) {
+        REPORT_ERROR(EC_PICKUP_RETRY, "10 retries failed");
+        StopMachine();
+      } else { goto retrypickup; }
+    }//If 10 retrys failed stop the machine
 }  
 
 //Homing routine to calibrate the machine
-void Homemachine() {PrintLCD("Calibrating", " ");ReadEndstops();  //Read the endstop values
-  if (Z_ENDSTOP_MIN == 1) {Move1(0, 800, zespeed);while (Z_ENDSTOP_MIN == 1) {Move1(1, 3, zespeed);Z_ENDSTOP_MIN = digitalRead(Zmin);}delay(200);}//calibrate z
-  if (Y_ENDSTOP_MIN == 1) {Move4(1, 0, 0, 50);while (Y_ENDSTOP_MIN == 1) {Move4(0, 1, 0, 5);Y_ENDSTOP_MIN = digitalRead(Ymin);}delay(200);}//calibrate y
-  if (X_ENDSTOP_MAX == 1) {Move4(1, 0, 50, 0);while (X_ENDSTOP_MAX == 1) {Move4(0, 1, 3, 0);X_ENDSTOP_MAX = digitalRead(Xmax);}delay(200);}//calibrate x
-  Move1(0, 3000, zspeed); delay(200);Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38); delay(200); //Move to home position
+void Homemachine() {PrintLCD("Calibrating", " ");ReadEndstops();
+  // Z axis home
+  if (Z_ENDSTOP_MIN == 1) {
+    Move1(0, 800, zespeed);
+    unsigned long t0 = millis();
+    while (Z_ENDSTOP_MIN == 1) {
+      Move1(1, 3, zespeed); Z_ENDSTOP_MIN = digitalRead(Zmin);
+      if (millis() - t0 > 10000) { REPORT_ERROR(EC_HOME_Z_FAIL, "Z endstop"); break; }
+    }
+    delay(200);
+  }
+  // Y axis home
+  if (Y_ENDSTOP_MIN == 1) {
+    Move4(1, 0, 0, 50);
+    unsigned long t1 = millis();
+    while (Y_ENDSTOP_MIN == 1) {
+      Move4(0, 1, 0, 5); Y_ENDSTOP_MIN = digitalRead(Ymin);
+      if (millis() - t1 > 10000) { REPORT_ERROR(EC_HOME_Y_FAIL, "Y endstop"); break; }
+    }
+    delay(200);
+  }
+  // X axis home
+  if (X_ENDSTOP_MAX == 1) {
+    Move4(1, 0, 50, 0);
+    unsigned long t2 = millis();
+    while (X_ENDSTOP_MAX == 1) {
+      Move4(0, 1, 3, 0); X_ENDSTOP_MAX = digitalRead(Xmax);
+      if (millis() - t2 > 10000) { REPORT_ERROR(EC_HOME_X_FAIL, "X endstop"); break; }
+    }
+    delay(200);
+  }
+  Move1(0, 3000, zspeed); delay(200); Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38); delay(200);
 }  
 
-void StopMachine() { //Stop the machine and display a message
-  PrintLCD("Machine stop", "Empty and reset"); MotorsOnOff(0); while (1) { delay(10000);}
+void StopMachine() {
+  REPORT_ERROR(EC_PICKUP_RETRY, "Machine halted");
+  PrintLCD("E505 Halted", "Empty and reset"); MotorsOnOff(0); while (1) { delay(10000);}
 }
 
 void ReadEndstops() { //Read the endstop sensors
@@ -184,6 +257,17 @@ void MotorsOnOff(boolean OnOff) { //Turns all motors on or off
 }
 
 void DetermineAction() { //Figure out what to do
+  // Parse optional step count from manual movement commands (e.g. "CalibrateX1,10")
+  int manualSteps = 5; // default steps per button press
+  int commaIdx = Tempval1.indexOf(',');
+  if (commaIdx > 0) {
+    String stepStr = Tempval1.substring(commaIdx + 1);
+    stepStr.trim();
+    int parsed = stepStr.toInt();
+    if (parsed > 0) manualSteps = parsed;
+    Tempval1 = Tempval1.substring(0, commaIdx); // strip suffix so equality checks below still work
+  }
+
   // Start/Stop commands
   if (Tempval1 == "StartMachine") {
     machineStarted = true;
@@ -201,8 +285,8 @@ void DetermineAction() { //Figure out what to do
   for (int i = 0; i < sizeof(MatchingValues) / sizeof(MatchingValues[0]); ++i) {
     if (Tempval1 == MatchingValues[i]) {
       if (!machineStarted) {
-        Serial.println("<Error,MachineNotStarted>");
-        PrintLCD("Error: Stopped", "Start machine!");
+        REPORT_ERROR(EC_CMD_NOT_STARTED, "Start machine");
+        PrintLCD("E507 Stopped", "Start machine!");
         return;
       }
       match = 1; atHomePosition = false; ForLoop(loopStart[i], loopEnd[i]); atHomePosition = true; 
@@ -211,21 +295,21 @@ void DetermineAction() { //Figure out what to do
   }
   
   // Manual controls only allowed when machine is stopped
-  if (Tempval1 == "CalibrateX1" || Tempval1 == "CalibrateX2" || 
-      Tempval1 == "CalibrateY1" || Tempval1 == "CalibrateY2" || 
+  if (Tempval1 == "CalibrateX1" || Tempval1 == "CalibrateX2" ||
+      Tempval1 == "CalibrateY1" || Tempval1 == "CalibrateY2" ||
       Tempval1 == "HomeButton") {
     if (machineStarted) {
-      Serial.println("<Error,MachineStarted>");
-      PrintLCD("Error: Started", "Stop machine!");
+      REPORT_ERROR(EC_CMD_STARTED, "Stop machine");
+      PrintLCD("E508 Started", "Stop machine!");
       return;
     }
   }
   
   // Calibration commands (minor movements)
-  if (Tempval1 == "CalibrateX1") {Move4(0,1,5,0);
-  } else if (Tempval1 == "CalibrateX2") {Move4(1,1,5,0);
-  } else if (Tempval1 == "CalibrateY1") {Move4(0,0,0,5);
-  } else if (Tempval1 == "CalibrateY2") {Move4(0,1,0,5);
+  if (Tempval1 == "CalibrateX1") {Move4(0,1,manualSteps,0);
+  } else if (Tempval1 == "CalibrateX2") {Move4(1,1,manualSteps,0);
+  } else if (Tempval1 == "CalibrateY1") {Move4(0,0,0,manualSteps);
+  } else if (Tempval1 == "CalibrateY2") {Move4(0,1,0,manualSteps);
   } else if (Tempval1 == "HomeButton") {Homemachine();atHomePosition = true;
   
   // Query sensor data
@@ -248,7 +332,7 @@ void DetermineAction() { //Figure out what to do
   // Motor control commands (only when stopped)
   } else if (Tempval1.startsWith("SetMotor,")) {
     if (machineStarted) {
-      Serial.println("<Error,MachineStarted>");
+      REPORT_ERROR(EC_CMD_STARTED, "Stop first");
       return;
     }
     
@@ -271,11 +355,11 @@ void DetermineAction() { //Figure out what to do
   // Parameter update commands (only allowed at home position AND when stopped)
   } else if (Tempval1.startsWith("SetParam,")) {
     if (machineStarted) {
-      Serial.println("<Error,MachineStarted>");
+      REPORT_ERROR(EC_CMD_STARTED, "Stop first");
       return;
     }
     if (!atHomePosition) {
-      Serial.println("<Error,NotAtHome>");
+      REPORT_ERROR(EC_NOT_AT_HOME, "Home first");
       return;
     }
     
@@ -315,7 +399,10 @@ void DetermineAction() { //Figure out what to do
     response += ">";
     Serial.println(response);
   
-  } else if (match = 1){match = 0;}else{ForLoop(1, 34);} // Handle everything else
+  } else if (match = 1){match = 0;} else {
+    REPORT_ERROR(EC_UNKNOWN_CMD, Tempval1.substring(0,10));
+    ForLoop(1, 34);
+  }
 }
 
 //Loop through trays and assign values accordingly
@@ -324,7 +411,10 @@ void ForLoop(byte first, byte last) {
     if (AssignedTrayValue[i] == "") {AssignedTrayValue[i] = Tempval1;PrintLCD("Tray assigned ", Tempval1);delay(10);} //if tray assignment is empty assign it the received variable
     if (AssignedTrayValue[i] == Tempval1 && CountArray[i] <= 375) {Tray(i);Serial.println((String) "Went to tray" + i);break;} //if tray assignment equals received value go to that tray and break the loop
     else if (i == 34 && CountArray[34] < 375) {Tray(34);break;} //If loop reaches 34 go to tray 34 if less than 375 cards is in that tray
-    else if (i == 34 && CountArray[34] >= 375) {StopMachine();Tempval1 = "";break;} //If loop reaches 34 and has 375 cards or more in it stop the machine
+    else if (i == 34 && CountArray[34] >= 375) {
+      REPORT_ERROR(EC_OVERFLOW_FULL, "Tray 34 full");
+      StopMachine(); Tempval1 = ""; break;
+    }
   }
 }
 

@@ -58,6 +58,7 @@ import requests
 import urllib.parse
 import sqlite3
 import glob
+from error_codes import ERROR_CODES, lookup as _ec_lookup, format_log as _elog
 
 # Plugin support
 try:
@@ -191,7 +192,11 @@ class ScannerGUI:
 
         # Compact UI toggle (helps fit everything on smaller screens)
         self.compact_mode_var = tk.BooleanVar(value=False)
-        
+
+        # Error log: list of (timestamp_str, code, message, fix)
+        self.error_log = []
+        self._error_badge_var = tk.StringVar(value="")
+
         self._setup_gui()
         # Prompt to download unified_card_database.db and load allowed game ids
         try:
@@ -214,6 +219,7 @@ class ScannerGUI:
                 self.log_status(f"Plugins loaded: {', '.join(self.plugin_manager.plugins.keys())}")
             except Exception as e:
                 self.log_status(f"Plugin loader error: {e}", error=True)
+                self.log_error('E108', str(e))
         # Start a lightweight poll to detect combobox changes on platforms where events may not fire
         try:
             self._last_game_var = self.game_var.get()
@@ -273,6 +279,11 @@ class ScannerGUI:
         tutorial_tab = tk.Frame(self.notebook, bg='#1e1e1e')
         self.notebook.add(tutorial_tab, text='📖 Tutorial')
         self._setup_tutorial_tab(tutorial_tab)
+
+        # Tab 8: Troubleshooting
+        self._troubleshooting_tab = tk.Frame(self.notebook, bg='#1e1e1e')
+        self.notebook.add(self._troubleshooting_tab, text='🔧 Troubleshoot')
+        self._setup_troubleshooting_tab(self._troubleshooting_tab)
         
     def _setup_camera_panel(self, parent):
         """Setup camera feed panel"""
@@ -659,19 +670,36 @@ class ScannerGUI:
         btn_frame = tk.Frame(move_frame, bg='#1a1a1a')
         btn_frame.pack(pady=5)
         
+        self.move_steps_var = tk.StringVar(value="1")
+
         self.movement_buttons = []
         for row, axis in enumerate([('X', 'CalibrateX'), ('Y', 'CalibrateY')]):
-            btn_minus = tk.Button(btn_frame, text=f"{axis[0]}-", command=lambda a=axis[1]: self.send_arduino_command(f"{a}1"),
+            btn_minus = tk.Button(btn_frame, text=f"{axis[0]}-",
+                     command=lambda a=axis[1]: self.send_arduino_command(
+                         f"{a}1,{self.move_steps_var.get()}"),
                      bg='#607D8B', fg='white', font=('Arial', 8), padx=8, pady=3, relief=tk.FLAT)
             btn_minus.grid(row=row, column=0, padx=2, pady=1)
             self.movement_buttons.append(btn_minus)
-            
+
             tk.Label(btn_frame, text=axis[0], bg='#1a1a1a', fg='#fff', font=('Arial', 9, 'bold'), width=3).grid(row=row, column=1, padx=5)
-            
-            btn_plus = tk.Button(btn_frame, text=f"{axis[0]}+", command=lambda a=axis[1]: self.send_arduino_command(f"{a}2"),
+
+            btn_plus = tk.Button(btn_frame, text=f"{axis[0]}+",
+                     command=lambda a=axis[1]: self.send_arduino_command(
+                         f"{a}2,{self.move_steps_var.get()}"),
                      bg='#607D8B', fg='white', font=('Arial', 8), padx=8, pady=3, relief=tk.FLAT)
             btn_plus.grid(row=row, column=2, padx=2, pady=1)
             self.movement_buttons.append(btn_plus)
+
+        # Steps input row
+        steps_row = tk.Frame(move_frame, bg='#1a1a1a')
+        steps_row.pack(pady=(2, 5))
+        tk.Label(steps_row, text="Steps:", bg='#1a1a1a', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT, padx=(8, 4))
+        steps_entry = tk.Spinbox(steps_row, from_=1, to=9999, textvariable=self.move_steps_var,
+                                  width=6, bg='#404040', fg='#fff', buttonbackground='#555',
+                                  insertbackground='#fff', font=('Arial', 9))
+        steps_entry.pack(side=tk.LEFT)
+        tk.Label(steps_row, text="(per button press)", bg='#1a1a1a', fg='#666', font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 0))
+        self.movement_buttons.append(steps_entry)  # disable during machine run
         
         # Parameters - compact 2-column layout
         self._section_label(frame, "PARAMETERS")
@@ -1135,6 +1163,7 @@ class ScannerGUI:
             except Exception as e:
                 # network/SSL error — stop and show error
                 try:
+                    self.log_error('E701', str(e))
                     messagebox.showerror("Download Error", f"Error contacting {url}: {e}")
                     self.download_status_label.config(text="")
                 except Exception:
@@ -1155,6 +1184,7 @@ class ScannerGUI:
                     return True
                 except Exception as e:
                     try:
+                        self.log_error('E704', str(e))
                         messagebox.showerror("Save Error", str(e))
                         self.download_status_label.config(text="")
                     except Exception:
@@ -1165,6 +1195,7 @@ class ScannerGUI:
                 continue
             else:
                 try:
+                    self.log_error('E702', f'HTTP {resp.status_code} {url}')
                     messagebox.showerror("Download Failed", f"Server returned {resp.status_code} for {url}")
                     self.download_status_label.config(text="")
                 except Exception:
@@ -1173,6 +1204,7 @@ class ScannerGUI:
 
         # All endpoints tried and not found
         try:
+            self.log_error('E702', 'all endpoints 404: ' + ', '.join(tried))
             messagebox.showerror("Download Failed", f"File not found on server. Tried:\n" + "\n".join(tried))
             self.download_status_label.config(text="")
         except Exception:
@@ -1263,6 +1295,7 @@ class ScannerGUI:
                     r = requests.get(url, stream=True, timeout=60, verify=verify_param)
                 except Exception as e:
                     # network/SSL error: report and stop
+                    self.root.after(0, lambda err=e: self.log_error('E701', str(err)))
                     self.root.after(0, lambda u=url, err=e: messagebox.showerror("Download Error", f"Error contacting {u}: {err}"))
                     self.root.after(0, lambda: self.download_status_label.config(text=""))
                     success = False
@@ -1296,6 +1329,7 @@ class ScannerGUI:
                                             pass
                         success = True
                     except Exception as e:
+                        self.root.after(0, lambda err=e: self.log_error('E704', str(err)))
                         self.root.after(0, lambda err=e: messagebox.showerror("Save Error", str(err)))
                         success = False
                     break
@@ -1303,6 +1337,7 @@ class ScannerGUI:
                     # try next endpoint
                     continue
                 else:
+                    self.root.after(0, lambda err=r.status_code: self.log_error('E702', f'HTTP {err}'))
                     self.root.after(0, lambda sc=r.status_code, u=url: messagebox.showerror("Download Failed", f"Server returned {sc} for {u}"))
                     success = False
                     break
@@ -1310,6 +1345,7 @@ class ScannerGUI:
             if not success and tried:
                 # if none succeeded, inform user (unless already shown)
                 if not any((t for t in tried if t.endswith(filename) and os.path.exists(os.path.join(os.path.dirname(__file__), 'recognition_data', filename)))):
+                    self.root.after(0, lambda: self.log_error('E702', 'all endpoints failed: ' + ', '.join(tried)))
                     self.root.after(0, lambda: messagebox.showerror("Download Failed", f"File not found on server. Tried:\n" + "\n".join(tried)))
                     self.root.after(0, lambda: self.download_status_label.config(text=""))
                     if prog_win:
@@ -1362,6 +1398,7 @@ class ScannerGUI:
                 except Exception:
                     pass
         except Exception as e:
+            self.root.after(0, lambda err=e: self.log_error('E701', str(err)))
             self.root.after(0, lambda err=e: messagebox.showerror("Download Error", str(err)))
             self.root.after(0, lambda: self.download_status_label.config(text=""))
             if prog_win:
@@ -1536,9 +1573,197 @@ class ScannerGUI:
         # bottom padding
         tk.Frame(inner, bg='#1e1e1e', height=20).pack()
 
+    # =========================================================================
+    # TROUBLESHOOTING TAB
+    # =========================================================================
+
+    def _setup_troubleshooting_tab(self, parent):
+        """Setup Troubleshooting tab: live error log + full error code reference."""
+        outer = tk.Frame(parent, bg='#1e1e1e')
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        # ── Top: Recent Error Log ─────────────────────────────────────────
+        log_frame = tk.Frame(outer, bg='#1a1a1a', relief=tk.SUNKEN, bd=1)
+        log_frame.pack(fill=tk.X, padx=12, pady=(10, 4))
+
+        hdr = tk.Frame(log_frame, bg='#1a1a1a')
+        hdr.pack(fill=tk.X, padx=8, pady=(6, 2))
+        tk.Label(hdr, text="Recent Errors", bg='#1a1a1a', fg='#ff6666',
+                 font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT)
+        self._error_count_lbl = tk.Label(hdr, textvariable=self._error_badge_var,
+                                          bg='#3a0000', fg='#ff9999',
+                                          font=('Segoe UI', 9, 'bold'), padx=6)
+        self._error_count_lbl.pack(side=tk.LEFT, padx=6)
+        tk.Button(hdr, text="Clear", command=self._clear_error_log,
+                  bg='#444', fg='#fff', font=('Arial', 8), padx=6, pady=2,
+                  relief=tk.FLAT, cursor='hand2').pack(side=tk.RIGHT, padx=4)
+        tk.Button(hdr, text="Copy", command=self._copy_error_log,
+                  bg='#2196F3', fg='#fff', font=('Arial', 8), padx=6, pady=2,
+                  relief=tk.FLAT, cursor='hand2').pack(side=tk.RIGHT, padx=4)
+
+        err_cols = ("Time", "Code", "Title", "Detail", "Fix")
+        self._err_table = ttk.Treeview(log_frame, columns=err_cols,
+                                        show='headings', height=6)
+        err_widths = {"Time": 70, "Code": 52, "Title": 180, "Detail": 260, "Fix": 280}
+        for c in err_cols:
+            self._err_table.heading(c, text=c)
+            self._err_table.column(c, width=err_widths.get(c, 100), stretch=False)
+        # Tag colours
+        self._err_table.tag_configure('error',   foreground='#ff6666')
+        self._err_table.tag_configure('warning', foreground='#ffcc44')
+
+        err_vsb = ttk.Scrollbar(log_frame, orient='vertical',
+                                 command=self._err_table.yview)
+        err_hsb = ttk.Scrollbar(log_frame, orient='horizontal',
+                                 command=self._err_table.xview)
+        self._err_table.configure(yscrollcommand=err_vsb.set,
+                                   xscrollcommand=err_hsb.set)
+        self._err_table.pack(side=tk.TOP, fill=tk.X, padx=8, pady=2)
+        err_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        err_hsb.pack(side=tk.BOTTOM, fill=tk.X, padx=8)
+
+        # ── Bottom: Error Code Reference ──────────────────────────────────
+        ref_outer = tk.Frame(outer, bg='#1e1e1e')
+        ref_outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 10))
+
+        ref_hdr = tk.Frame(ref_outer, bg='#1e1e1e')
+        ref_hdr.pack(fill=tk.X, pady=(4, 2))
+        tk.Label(ref_hdr, text="Error Code Reference", bg='#1e1e1e', fg='#4CAF50',
+                 font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT)
+
+        # Search bar
+        tk.Label(ref_hdr, text="Search:", bg='#1e1e1e', fg='#aaa',
+                 font=('Arial', 9)).pack(side=tk.LEFT, padx=(20, 4))
+        self._ref_search_var = tk.StringVar()
+        self._ref_search_var.trace_add('write', lambda *_: self._filter_ref_table())
+        tk.Entry(ref_hdr, textvariable=self._ref_search_var, width=26,
+                 bg='#404040', fg='#fff', insertbackground='#fff',
+                 font=('Arial', 9)).pack(side=tk.LEFT)
+
+        ref_cols = ("Code", "Title", "Description", "Fix")
+        self._ref_table = ttk.Treeview(ref_outer, columns=ref_cols,
+                                        show='headings', height=16)
+        ref_widths = {"Code": 52, "Title": 200, "Description": 310, "Fix": 300}
+        for c in ref_cols:
+            self._ref_table.heading(c, text=c)
+            self._ref_table.column(c, width=ref_widths.get(c, 120), stretch=False)
+        self._ref_table.tag_configure('error',   foreground='#ff9999')
+        self._ref_table.tag_configure('warning', foreground='#ffcc44')
+        self._ref_table.tag_configure('cat',     foreground='#4CAF50',
+                                       background='#1a2a1a', font=('Segoe UI', 9, 'bold'))
+
+        ref_vsb = ttk.Scrollbar(ref_outer, orient='vertical',
+                                 command=self._ref_table.yview)
+        ref_hsb = ttk.Scrollbar(ref_outer, orient='horizontal',
+                                 command=self._ref_table.xview)
+        self._ref_table.configure(yscrollcommand=ref_vsb.set,
+                                   xscrollcommand=ref_hsb.set)
+        self._ref_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ref_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        ref_hsb.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._populate_ref_table(ERROR_CODES)
+
+    def _populate_ref_table(self, codes: dict, search: str = ""):
+        """Fill the reference table, with optional search filter."""
+        for row in self._ref_table.get_children():
+            self._ref_table.delete(row)
+
+        categories = {
+            "E1": "── Database & Initialisation ──",
+            "E2": "── Camera & Vision ──",
+            "E3": "── Recognition / Matching ──",
+            "E4": "── Serial / Arduino Communication ──",
+            "E5": "── Arduino Hardware ──",
+            "E6": "── Collection & Export ──",
+            "E7": "── Network / Download ──",
+        }
+
+        s = search.lower()
+        last_cat = None
+        for code, entry in sorted(codes.items()):
+            # Filter
+            if s and s not in code.lower() \
+                  and s not in entry['title'].lower() \
+                  and s not in entry['description'].lower() \
+                  and s not in entry['fix'].lower():
+                continue
+            # Category header row
+            prefix = code[:2]
+            if prefix != last_cat and prefix in categories:
+                last_cat = prefix
+                self._ref_table.insert('', 'end',
+                    values=(prefix + "xx", categories[prefix], "", ""),
+                    tags=('cat',))
+            sev = entry.get('severity', 'error')
+            self._ref_table.insert('', 'end',
+                values=(code, entry['title'], entry['description'], entry['fix']),
+                tags=(sev,))
+
+    def _filter_ref_table(self):
+        self._populate_ref_table(ERROR_CODES, self._ref_search_var.get())
+
+    def _clear_error_log(self):
+        self.error_log.clear()
+        for row in self._err_table.get_children():
+            self._err_table.delete(row)
+        self._error_badge_var.set("")
+
+    def _copy_error_log(self):
+        """Copy recent error log to clipboard."""
+        lines = ["\t".join(map(str, e)) for e in self.error_log]
+        text = "\n".join(lines)
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except Exception:
+            pass
+
+    def log_error(self, code: str, detail: str = ""):
+        """Log a structured error — updates the status log AND the Troubleshooting tab."""
+        entry = _ec_lookup(code)
+        title  = entry.get('title', 'Unknown Error')
+        fix    = entry.get('fix', '')
+        sev    = entry.get('severity', 'error')
+        ts     = time.strftime("%H:%M:%S")
+
+        # Append to in-memory log (keep last 200)
+        self.error_log.append((ts, code, title, detail, fix))
+        if len(self.error_log) > 200:
+            self.error_log.pop(0)
+
+        # Update badge
+        count = len(self.error_log)
+        self._error_badge_var.set(f"{count} error{'s' if count != 1 else ''}")
+
+        # Update table on main thread
+        def _insert():
+            try:
+                self._err_table.insert('', 0,
+                    values=(ts, code, title, detail[:80], fix[:80]),
+                    tags=(sev,))
+                # Prune table to 200 rows
+                children = self._err_table.get_children()
+                if len(children) > 200:
+                    self._err_table.delete(children[-1])
+            except Exception:
+                pass
+        try:
+            self.root.after(0, _insert)
+        except Exception:
+            pass
+
+        # Also push to the status log with code prefix
+        msg = f"[{code}] {title}"
+        if detail:
+            msg += f": {detail}"
+        self.log_status(msg, error=True)
+
+    # =========================================================================
+
     def _section_label(self, parent, text):
         """Create section header"""
-        tk.Label(parent, text=text, bg='#1e1e1e', fg='#4CAF50', 
+        tk.Label(parent, text=text, bg='#1e1e1e', fg='#4CAF50',
                 font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W, padx=20, pady=(10, 5))
     
     def _init_scanner(self):
@@ -1580,7 +1805,7 @@ class ScannerGUI:
             self.session_start = time.time()
             self._update_stats()
         except Exception as e:
-            self.log_status(f"ERROR: {e}", error=True)
+            self.log_error('E101', str(e))
             messagebox.showerror("Scanner Error", f"Failed to initialize:\n{e}")
     
     def _populate_dropdowns(self):
@@ -1700,7 +1925,8 @@ class ScannerGUI:
                         if (info.get('display_name') or k) == game_name:
                             game_key = k
                             break
-            if not game_key or game_key not in self.scanner.games:
+            if not self.scanner:
+                self.log_error('E106', 'game_data load: scanner is None')
                 self.log_status(f"Game '{game_name}' not found in database", error=True)
                 return
 
@@ -1767,6 +1993,7 @@ class ScannerGUI:
             self.foil_var.set("All Foil Types")
         except Exception as e:
             self.log_status(f"Error loading game data: {e}", error=True)
+            self.log_error('E105', str(e))
 
     def _poll_game_var(self):
         try:
@@ -1891,10 +2118,10 @@ class ScannerGUI:
                     try:
                         ok = bool(self.scanner.init_serial())
                     except Exception as e:
-                        self.root.after(0, lambda err=e: self.log_status(f"Arduino connection error: {err}", error=True))
+                        self.root.after(0, lambda err=e: self.log_error('E405', str(err)))
                         ok = False
             except Exception as e:
-                self.root.after(0, lambda err=e: self.log_status(f"Arduino connection error: {err}", error=True))
+                self.root.after(0, lambda err=e: self.log_error('E405', str(err)))
                 ok = False
 
             def _on_done(success):
@@ -1910,7 +2137,7 @@ class ScannerGUI:
                     self.stop_machine_btn.configure(state=tk.DISABLED)
                     self._update_controls_state()
                 else:
-                    self.log_status("✗ Failed to connect to Arduino", error=True)
+                    self.log_error('E403')
                     try:
                         self.connect_btn.configure(text="Connect", state=tk.NORMAL, bg='#FF9800')
                     except Exception:
@@ -1944,6 +2171,7 @@ class ScannerGUI:
             self.log_status("✓ Machine STARTED - Manual controls disabled")
         else:
             self.log_status("✗ Failed to start machine", error=True)
+            self.log_error('E406', 'StartMachine no OK')
             messagebox.showerror("Error", "Failed to start machine")
 
     def arduino_home(self):
@@ -1981,6 +2209,7 @@ class ScannerGUI:
             self.log_status("✓ Machine STOPPED - Manual controls enabled")
         else:
             self.log_status("✗ Failed to stop machine", error=True)
+            self.log_error('E406', 'StopMachine no OK')
             messagebox.showerror("Error", "Failed to stop machine")
     
     def _update_controls_state(self):
@@ -2005,6 +2234,7 @@ class ScannerGUI:
         """Toggle motor/relay"""
         if self.machine_started:
             self.log_status("⚠ Cannot control motors while machine is started", error=True)
+            self.log_error('E508', f'toggle_motor:{name}')
             # Revert checkbox
             self.motor_vars[name].set(not self.motor_vars[name].get())
             return
@@ -2029,8 +2259,11 @@ class ScannerGUI:
     def send_arduino_command(self, cmd):
         """Send command to Arduino"""
         # Check if manual control command while machine is started
-        if self.machine_started and cmd in ["HomeButton", "CalibrateX1", "CalibrateX2", "CalibrateY1", "CalibrateY2"]:
+        # Commands may carry a step suffix e.g. "CalibrateX1,10" — compare base name only
+        _cmd_base = cmd.split(',')[0]
+        if self.machine_started and _cmd_base in ["HomeButton", "CalibrateX1", "CalibrateX2", "CalibrateY1", "CalibrateY2"]:
             self.log_status("⚠ Cannot send manual commands while machine is started", error=True)
+            self.log_error('E508', f'cmd={_cmd_base}')
             messagebox.showwarning("Machine Started", "Stop the machine first to use manual controls")
             return
         
@@ -2038,11 +2271,31 @@ class ScannerGUI:
             response = self._send_arduino(cmd)
             self.log_status(f"→ {cmd}")
             if response:
-                self.log_status(f"← {response}")
+                self._handle_arduino_response(response, cmd)
                 if "MachineStarted" in response:
                     messagebox.showwarning("Machine Started", "Machine must be STOPPED for this command")
         else:
             self.log_status("Arduino not connected", error=True)
+            self.log_error('E402', 'send_arduino_command')
+
+    def _handle_arduino_response(self, response: str, context: str = ""):
+        """Parse an Arduino response; log error codes if the response contains one."""
+        if not response:
+            return
+        self.log_status(f"  \u2190 Arduino: {response}")
+        # New structured format: <Error,EXXX,detail>
+        if response.startswith("Error,E"):
+            parts = response.split(",", 2)
+            code = parts[1] if len(parts) > 1 else "E500"
+            detail = parts[2] if len(parts) > 2 else context
+            self.log_error(code, detail)
+        # Legacy flat tags
+        elif "MachineStarted" in response:
+            self.log_error("E508", context or "command rejected")
+        elif "MachineNotStarted" in response:
+            self.log_error("E507", context or "tray command sent while stopped")
+        elif "NotAtHome" in response:
+            self.log_error("E509", context or "params sent while not at home")
 
     def _send_arduino(self, cmd):
         """Route command to Arduino plugin if available, else fallback to scanner serial."""
@@ -2083,10 +2336,12 @@ class ScannerGUI:
         """Upload all parameters to Arduino"""
         if not self.scanner or not self.scanner.ser:
             self.log_status("Arduino not connected", error=True)
+            self.log_error('E402', 'upload_params')
             return
         
         if self.machine_started:
             self.log_status("⚠ Cannot upload params while machine is started", error=True)
+            self.log_error('E508', 'upload_params')
             messagebox.showwarning("Machine Started", 
                 "Machine must be STOPPED to upload parameters.\n\nClick 'Stop Machine' first.")
             return
@@ -2115,31 +2370,37 @@ class ScannerGUI:
                     success_count += 1
                 elif response and "MachineStarted" in response:
                     self.log_status("⚠ Machine is started - stop first", error=True)
-                    messagebox.showwarning("Machine Started", 
+                    self.log_error('E508', f'upload_params:{gui_key}')
+                    messagebox.showwarning("Machine Started",
                         "Machine must be STOPPED to upload parameters.\n\nClick 'Stop Machine' first.")
                     return
                 elif response and "NotAtHome" in response:
                     self.log_status("⚠ Arduino not at home position - params rejected", error=True)
-                    messagebox.showwarning("Not At Home", 
+                    self.log_error('E509', f'upload_params:{gui_key}')
+                    messagebox.showwarning("Not At Home",
                         "Arduino must be at home position to accept parameter changes.\n\nClick 'Home Machine' first.")
                     return
                 else:
                     self.log_status(f"✗ Failed to set {gui_key}", error=True)
+                    self.log_error('E406', f'SetParam:{gui_key}')
                 
                 time.sleep(0.05)  # Small delay between commands
             except Exception as e:
                 self.log_status(f"✗ Error setting {gui_key}: {e}", error=True)
+                self.log_error('E405', f'SetParam:{gui_key}:{e}')
         
         if success_count == len(param_mapping):
             self.log_status(f"✓ Uploaded {success_count} parameters to Arduino")
             messagebox.showinfo("Success", f"Uploaded {success_count} parameters to Arduino")
         else:
             self.log_status(f"⚠ Uploaded {success_count}/{len(param_mapping)} parameters", error=True)
+            self.log_error('E407', f'{success_count}/{len(param_mapping)} params uploaded')
     
     def fetch_params(self):
         """Fetch current parameters from Arduino"""
         if not self.scanner or not self.scanner.ser:
             self.log_status("Arduino not connected", error=True)
+            self.log_error('E402', 'fetch_params')
             return
         
         try:
@@ -2176,9 +2437,10 @@ class ScannerGUI:
                 messagebox.showinfo("Success", f"Fetched {fetched} parameters from Arduino")
             else:
                 self.log_status("✗ Failed to fetch parameters", error=True)
+                self.log_error('E406', 'QueryParams no valid response')
         except Exception as e:
             self.log_status(f"✗ Fetch error: {e}", error=True)
-    
+            self.log_error('E405', str(e))
     def _arduino_monitor_loop(self):
         """Monitor Arduino sensors"""
         while self.arduino_monitoring:
@@ -2221,6 +2483,7 @@ class ScannerGUI:
                                         label.configure(text=f"{name}: {status}", fg=color)
                 except Exception as e:
                     self.log_status(f"Monitor error: {e}", error=True)
+                    self.log_error('E405', f'monitor_loop:{e}')
             
             time.sleep(0.5)
     
@@ -2245,7 +2508,7 @@ class ScannerGUI:
                     is_foil=self.default_foil.get()
                 )
             except Exception as e:
-                self.log_status(f"Error saving to collection: {e}", error=True)
+                self.log_error('E603', str(e))
         
         # Extract data from saved entry or use defaults
         if saved_entry:
@@ -2277,6 +2540,7 @@ class ScannerGUI:
         """Export collection using scanner's collection manager"""
         if not self.scanner or not self.scanner.collection_manager:
             messagebox.showerror("Error", "Collection manager not initialized")
+            self.log_error('E601', 'export_collection')
             return
         
         try:
@@ -2301,13 +2565,14 @@ class ScannerGUI:
             else:
                 messagebox.showwarning("Export Warning", "No cards to export")
         except Exception as e:
-            self.log_status(f"✗ Export failed: {e}", error=True)
+            self.log_error('E602', str(e))
             messagebox.showerror("Export Error", str(e))
     
     def clear_collection_session(self):
         """Clear current collection session"""
         if not self.scanner or not self.scanner.collection_manager:
             messagebox.showerror("Error", "Collection manager not initialized")
+            self.log_error('E601', 'clear_collection_session')
             return
         
         if messagebox.askyesno("Clear Session", "Clear current session?\n\nThis will not affect the master collection."):
@@ -2323,12 +2588,14 @@ class ScannerGUI:
                 self._update_stats()
             except Exception as e:
                 self.log_status(f"✗ Clear session failed: {e}", error=True)
+                self.log_error('E601', str(e))
                 messagebox.showerror("Error", str(e))
     
     def clear_master_collection(self):
         """Clear entire master collection"""
         if not self.scanner or not self.scanner.collection_manager:
             messagebox.showerror("Error", "Collection manager not initialized")
+            self.log_error('E601', 'clear_master_collection')
             return
         
         if messagebox.askyesno("Clear Master Collection", 
@@ -2355,6 +2622,7 @@ class ScannerGUI:
                 messagebox.showinfo("Success", "Master collection has been cleared.")
             except Exception as e:
                 self.log_status(f"✗ Clear master collection failed: {e}", error=True)
+                self.log_error('E601', str(e))
                 messagebox.showerror("Error", str(e))
     
     def _update_stats(self):
@@ -2412,7 +2680,7 @@ class ScannerGUI:
         if not getattr(self, 'camera_plugin', None):
             self.camera = cv2.VideoCapture(0)
             if not self.camera.isOpened():
-                self.log_status("✗ Cannot open camera", error=True)
+                self.log_error('E201', f'Camera index {self.camera_index_var.get() if hasattr(self, "camera_index_var") else 0}')
                 messagebox.showerror("Error", "Cannot open camera")
                 return
             # Try to reduce internal camera buffering to lower latency (may be ignored on some platforms)
@@ -2623,6 +2891,7 @@ class ScannerGUI:
                 # Schedule a thread-safe log
                 try:
                     self.root.after(0, lambda: self.log_status(f"Scan thread error: {e}", error=True))
+                    self.root.after(0, lambda err=e: self.log_error('E304', str(err)))
                 except Exception:
                     pass
         finally:
@@ -2648,6 +2917,7 @@ class ScannerGUI:
             self._perform_scan(self.current_frame, card_approx)
         else:
             self.log_status("✗ No card detected", error=True)
+            self.log_error('E203', 'manual_scan')
     
     def _perform_scan(self, frame, card_approx):
         """Scan card"""
@@ -2681,13 +2951,14 @@ class ScannerGUI:
                     card_info = self.recognition_plugin.recognize(frame, card_approx, self.scanner)
                 except Exception as e:
                     self.log_status(f"Recognition plugin error: {e}", error=True)
+                    self.log_error('E305', str(e))
 
             if not card_info:
                 card_info = self.scanner._process_card_from_contour(frame, card_approx)
             
             if not card_info:
                 self.detection_info = {'status': 'error', 'message': 'Not recognized', 'bin': 'RejectCard'}
-                self.log_status("✗ Card not recognized")
+                self.log_error('E301')
                 return
 
             # Attach scan image path + backend to card_info for persistence
@@ -2726,7 +2997,7 @@ class ScannerGUI:
                 if card_info == "RejectCard":
                     self.detection_info = {'status': 'reject', 'message': 'In inventory', 'bin': 'RejectCard'}
                     self.log_status("⊗ Already in inventory")
-                    if self.scanner.ser:
+                    if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
                         self._send_arduino("RejectCard")
                     return
             
@@ -2750,13 +3021,13 @@ class ScannerGUI:
             # Add to history
             self._add_to_history(card_info, bin_result, sorting_mode)
             
-            if self.scanner.ser:
+            if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
                 response = self._send_arduino(bin_result)
                 if response:
-                    self.log_status(f"  ← Arduino: {response}")
+                    self._handle_arduino_response(response, bin_result)
         
         except Exception as e:
-            self.log_status(f"✗ Scan error: {e}", error=True)
+            self.log_error('E304', str(e))
     
     def _draw_detection_info(self, frame, info):
         """Draw info on frame"""

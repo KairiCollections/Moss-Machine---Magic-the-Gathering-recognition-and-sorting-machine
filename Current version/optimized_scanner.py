@@ -62,6 +62,9 @@ except Exception:
 import os
 import json
 
+# Error code reference
+from error_codes import format_log as _elog
+
 # Import collection manager
 from card_collection_manager import CardCollectionManager
 from mtg_symbol_recognizer import (
@@ -113,10 +116,10 @@ def download_database(db_path="unified_card_database.db"):
             print(f"\n[+] Successfully downloaded database from {server_url}")
             return True
         except Exception as e:
-            print(f"\n[!] Failed to download from {server_url}: {e}")
+            print(f"\n{_elog('E102', str(e))} (tried {server_url})")
             continue
 
-    print("[!] Could not download database from any server")
+    print(_elog('E102', 'all server endpoints exhausted'))
     return False
 
 class OptimizedCardScanner:
@@ -146,7 +149,7 @@ class OptimizedCardScanner:
         
         # Download database if it doesn't exist
         if not download_database(db_path):
-            raise FileNotFoundError(f"Database not found and could not be downloaded: {db_path}")
+            raise FileNotFoundError(_elog('E101', db_path))
         
         # Main database connection
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -166,7 +169,7 @@ class OptimizedCardScanner:
                 self.collection_manager = CardCollectionManager()
                 print("[+] Collection manager initialized")
             except Exception as e:
-                print(f"[!] Collection manager disabled: {e}")
+                print(_elog('E104', str(e)))
                 self.collection_enabled = False
         
         # Load games list and find actual table names from database
@@ -216,6 +219,8 @@ class OptimizedCardScanner:
                     }
         
         print(f"[+] Loaded {len(self.games)} games")
+        if not self.games:
+            print(_elog('E103', db_path))
         print(f"[+] Max workers: {max_workers}")
         print(f"[+] Hash caching: {'enabled' if cache_enabled else 'disabled'}")
         
@@ -276,10 +281,10 @@ class OptimizedCardScanner:
     def init_serial(self):
         """Initialize serial connection to Arduino"""
         if serial is None:
-            print("[!] pyserial is not installed. Run: pip install pyserial")
+            print(_elog('E401'))
             return False
         if not self.serial_port:
-            print("[!] Serial port not configured")
+            print(_elog('E402'))
             return False
         
         try:
@@ -292,7 +297,7 @@ class OptimizedCardScanner:
                 return False
             return True
         except Exception as e:
-            print(f"[!] Failed to open serial port: {e}")
+            print(_elog('E403', str(e)))
             return False
     
     def send_to_arduino(self, send_str):
@@ -310,11 +315,11 @@ class OptimizedCardScanner:
             if resp:
                 print(f"[<-] Arduino: {resp}")
             else:
-                print("[!] No response received from Arduino (timeout)")
+                print(_elog('E406'))
 
             return resp
         except Exception as e:
-            print(f"[!] Error sending to Arduino: {e}")
+            print(_elog('E405', str(e)))
             return None
     
     def recv_from_arduino(self):
@@ -359,7 +364,7 @@ class OptimizedCardScanner:
         msg = ""
         while "Arduino is ready" not in msg:
             if time.time() > deadline:
-                print("[!] Timed out waiting for Arduino ready signal")
+                print(_elog('E404'))
                 return False
             if self.ser.in_waiting == 0:
                 time.sleep(0.05)
@@ -649,7 +654,7 @@ class OptimizedCardScanner:
             return card_info
         
         except Exception as e:
-            print(f"[!] Inventory check error: {e}")
+            print(_elog('E605', str(e)))
             return card_info
     
 
@@ -1023,6 +1028,7 @@ class OptimizedCardScanner:
             self.stats['cards_checked'] += len(cards)
         
         except sqlite3.OperationalError:
+            print(_elog('E303', f'game={game_name}'))
             pass
         
         return matches
@@ -1132,7 +1138,7 @@ class OptimizedCardScanner:
         """Scan from image file"""
         image = cv2.imread(str(image_path))
         if image is None:
-            print(f"[!] Failed to load image: {image_path}")
+            print(_elog('E107', str(image_path)))
             return [], 0
         
         return self.scan_card(image, threshold, top_n, set_filter, foil_type_filter, rarity_filter, game_filter)
@@ -1192,10 +1198,8 @@ class OptimizedCardScanner:
             Card entry if saved, None if collection disabled
         """
         if not self.collection_manager:
-            print("[!] Collection manager not initialized")
+            print(_elog('E601', 'save_to_collection: manager None'))
             return None
-        
-        # Use defaults if not specified
         if quantity is None:
             quantity = 1
         if condition is None:
@@ -1216,7 +1220,7 @@ class OptimizedCardScanner:
             print(f"[+] Saved to collection: {entry['name']} ({entry['sku']})")
             return entry
         except Exception as e:
-            print(f"[!] Error saving to collection: {e}")
+            print(_elog('E603', str(e)))
             return None
     
     def export_collection(self, format_type='both', by_game=False):
@@ -1231,7 +1235,7 @@ class OptimizedCardScanner:
             Exported file path(s)
         """
         if not self.collection_manager:
-            print("[!] Collection manager not initialized")
+            print(_elog('E601', 'export_collection: manager None'))
             return None
         
         if by_game:
@@ -1280,7 +1284,7 @@ class OptimizedCardScanner:
         # Open webcam
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            print("[!] Cannot open webcam")
+            print(_elog('E201', 'webcam index 0'))
             return
         
         frame_count = 0
@@ -1293,7 +1297,7 @@ class OptimizedCardScanner:
                 ret, frame = cap.read()
                 
                 if not ret:
-                    print("[!] Failed to grab frame")
+                    print(_elog('E205', 'frame grab failed'))
                     break
                 
                 # Show camera feed
@@ -1512,7 +1516,7 @@ class OptimizedCardScanner:
             return None
 
         except Exception as e:
-            print(f"[!] Error processing card: {e}")
+            print(_elog('E304', str(e)))
             return None
     
     def _get_perspective_corrected_card(self, frame, card_approx):
@@ -1554,7 +1558,7 @@ class OptimizedCardScanner:
             return warped
         
         except Exception as e:
-            print(f"[!] Perspective correction error: {e}")
+            print(_elog('E204', str(e)))
             return None
 
     def _load_mtg_roi_config(self):
